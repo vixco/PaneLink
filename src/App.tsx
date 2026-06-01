@@ -14,6 +14,7 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import {
   addRemoteScreen,
+  closeDisplayWindow,
   connectPeer,
   disconnectPeer,
   getCapabilities,
@@ -22,6 +23,7 @@ import {
   getStreamState,
   listAudioDevices,
   listPeers,
+  openDisplayWindow,
   removeRemoteScreen,
   scanPeers,
   startStream,
@@ -40,8 +42,17 @@ type AppData = {
 };
 
 const qualities: StreamState['quality'][] = ['Low latency', 'Balanced', 'Sharp'];
+const isDisplayWindow = new URLSearchParams(window.location.search).get('window') === 'display';
 
 function App() {
+  if (isDisplayWindow) {
+    return <DisplayWindow />;
+  }
+
+  return <ControlApp />;
+}
+
+function ControlApp() {
   const [data, setData] = useState<AppData>({
     peers: [],
     session: null,
@@ -60,6 +71,7 @@ function App() {
   const [pairingCode, setPairingCode] = useState('');
   const [pairingError, setPairingError] = useState('');
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ state: 'idle', label: 'Updates ready' });
+  const [displayWindow, setDisplayWindow] = useState({ attached: false, message: 'Display window closed' });
 
   useEffect(() => {
     void loadEverything(true);
@@ -83,8 +95,27 @@ function App() {
   const screens = session?.screens ?? [];
   const isConnected = session?.status === 'connected' || session?.status === 'degraded';
   const isStreaming = stream?.status === 'streaming' || stream?.status === 'live';
+  const displayPipelineReady = data.capabilities?.display.capture === 'available'
+    && data.capabilities?.display.virtualDisplay === 'available';
+  const receiverReady = isStreaming && displayWindow.attached;
   const selectedPeerTrusted = selectedPeer ? trustedPeerIds.includes(selectedPeer.id) || selectedPeer.trusted : false;
   const localPairingCode = data.capabilities?.peerId ? pairingCodeForPeer(data.capabilities.peerId) : 'laden...';
+
+  async function startStreamAndOpenDisplay(peer: Peer, nextSession: SessionSnapshot) {
+    const nextStream = await startStream({
+      peerId: peer.id,
+      screenIds: nextSession.screens.map((screen) => screen.id),
+      quality,
+    });
+    const nextDisplayWindow = await openDisplayWindow({
+      peerId: peer.id,
+      screenCount: nextSession.screens.length,
+      quality,
+    });
+    setDisplayWindow(nextDisplayWindow);
+
+    return nextStream;
+  }
 
   async function loadEverything(scan = false) {
     setIsScanning(scan);
@@ -119,6 +150,8 @@ function App() {
       if (isConnected) {
         const nextStream = await stopStream();
         const nextSession = await disconnectPeer();
+        const nextDisplayWindow = await closeDisplayWindow();
+        setDisplayWindow(nextDisplayWindow);
         setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
         return;
       }
@@ -131,11 +164,7 @@ function App() {
       }
 
       const nextSession = await connectPeer(selectedPeer.id);
-      const nextStream = await startStream({
-        peerId: selectedPeer.id,
-        screenIds: nextSession.screens.map((screen) => screen.id),
-        quality,
-      });
+      const nextStream = await startStreamAndOpenDisplay(selectedPeer, nextSession);
       setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
     } finally {
       setIsBusy(false);
@@ -148,11 +177,7 @@ function App() {
     setIsBusy(true);
     try {
       const nextSession = await addRemoteScreen(selectedPeer.id);
-      const nextStream = await startStream({
-        peerId: selectedPeer.id,
-        screenIds: nextSession.screens.map((screen) => screen.id),
-        quality,
-      });
+      const nextStream = await startStreamAndOpenDisplay(selectedPeer, nextSession);
       setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
     } finally {
       setIsBusy(false);
@@ -165,13 +190,7 @@ function App() {
     setIsBusy(true);
     try {
       const nextSession = await removeRemoteScreen(screenId);
-      const nextStream = selectedPeer
-        ? await startStream({
-            peerId: selectedPeer.id,
-            screenIds: nextSession.screens.map((screen) => screen.id),
-            quality,
-          })
-        : data.stream;
+      const nextStream = selectedPeer ? await startStreamAndOpenDisplay(selectedPeer, nextSession) : data.stream;
       setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
     } finally {
       setIsBusy(false);
@@ -184,6 +203,22 @@ function App() {
       await checkAndInstallUpdate(setUpdateStatus);
     } finally {
       setIsCheckingUpdate(false);
+    }
+  }
+
+  async function handleOpenDisplayWindow() {
+    if (!selectedPeer || !isConnected) return;
+
+    setIsBusy(true);
+    try {
+      const nextDisplayWindow = await openDisplayWindow({
+        peerId: selectedPeer.id,
+        screenCount: Math.max(screens.length, 1),
+        quality,
+      });
+      setDisplayWindow(nextDisplayWindow);
+    } finally {
+      setIsBusy(false);
     }
   }
 
@@ -208,11 +243,7 @@ function App() {
     setIsBusy(true);
     try {
       const nextSession = await connectPeer(selectedPeer.id);
-      const nextStream = await startStream({
-        peerId: selectedPeer.id,
-        screenIds: nextSession.screens.map((screen) => screen.id),
-        quality,
-      });
+      const nextStream = await startStreamAndOpenDisplay(selectedPeer, nextSession);
       setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
     } finally {
       setIsBusy(false);
@@ -334,10 +365,10 @@ function App() {
               <span className="section-label">Session</span>
               <h2>{isConnected ? selectedPeer?.name ?? 'Verbonden apparaat' : 'Nog niet verbonden'}</h2>
             </div>
-            <strong>{isStreaming ? `${stream?.fps ?? 0} FPS` : 'Standby'}</strong>
+            <strong>{receiverReady ? `${stream?.fps ?? 0} FPS` : isConnected ? 'Receiver nodig' : 'Standby'}</strong>
           </div>
 
-          <div className={isStreaming ? 'preview-frame streaming' : 'preview-frame'}>
+          <div className={receiverReady ? 'preview-frame streaming' : isStreaming ? 'preview-frame receiver-needed' : 'preview-frame'}>
             <div className={`screen-grid screen-count-${Math.max(screens.length, 1)}`}>
               {(screens.length ? screens : [{ id: 'placeholder', fittedResolution: 'Auto-fit ready' } as RemoteScreen]).map((screen, index) => (
                 <div key={screen.id}>
@@ -348,14 +379,33 @@ function App() {
             </div>
             <div className="preview-copy">
               <Monitor size={30} />
-              <strong>{isStreaming ? 'Stream actief' : isConnected ? 'Stream starten...' : 'Wacht op verbinding'}</strong>
+              <strong>
+                {receiverReady ? 'Receiver window open' : isStreaming ? 'Display nog niet aangesloten' : isConnected ? 'Stream starten...' : 'Wacht op verbinding'}
+              </strong>
               <span>
+                {receiverReady && displayPipelineReady
+                  ? `${stream?.codec ?? 'H.264'} - frame ${stream?.frameId ?? 0} - ${stream?.latencyMs ?? 0} ms`
+                  : receiverReady
+                    ? 'Receiver staat open. Echte schermpixels wachten nog op native capture en virtual display driver.'
+                    : isStreaming
+                      ? 'Transport loopt, maar er is nog geen display window zichtbaar.'
+                      : isConnected
+                        ? 'De stream-engine wordt gestart.'
+                        : 'Klik links op verbinden.'}
+              </span>
+              <span hidden>
                 {isStreaming
                   ? `${stream?.codec ?? 'H.264'} · frame ${stream?.frameId ?? 0} · ${stream?.latencyMs ?? 0} ms`
                   : isConnected
                     ? 'De stream-engine wordt gestart.'
                     : 'Klik links op verbinden.'}
               </span>
+              {isConnected && (
+                <button className="inline-action" disabled={isBusy} onClick={handleOpenDisplayWindow}>
+                  {isBusy ? <Loader2 className="spin" size={15} /> : <Monitor size={15} />}
+                  Open display
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -426,6 +476,9 @@ function App() {
           <small className="muted">Pairing code: {localPairingCode}</small>
           <small className="muted">Update: {updateStatus.label}</small>
           <small className="muted">Peer ID: {data.capabilities?.peerId ?? 'laden...'}</small>
+          <small className="muted">Display window: {displayWindow.attached ? 'open' : 'closed'}</small>
+          <small className="muted">Capture: {data.capabilities?.display.capture ?? 'laden...'}</small>
+          <small className="muted">Virtual display: {data.capabilities?.display.virtualDisplay ?? 'laden...'}</small>
           {data.permissions.slice(0, 2).map((permission) => (
             <small className="muted" key={permission.key}>
               {permission.label}: {permission.status}
@@ -433,6 +486,32 @@ function App() {
           ))}
         </div>
       </section>
+    </main>
+  );
+}
+
+function DisplayWindow() {
+  const params = new URLSearchParams(window.location.search);
+  const peerId = params.get('peerId') ?? 'unknown';
+  const quality = params.get('quality') ?? 'Low latency';
+  const screenCount = Math.max(1, Math.min(Number(params.get('screens') ?? 1), 3));
+  const screens = Array.from({ length: screenCount }, (_, index) => index + 1);
+
+  return (
+    <main className="display-window-shell">
+      <section className={`display-window-grid screen-count-${screenCount}`}>
+        {screens.map((screen) => (
+          <div className="display-window-screen" key={screen}>
+            <span>Screen {screen}</span>
+          </div>
+        ))}
+      </section>
+      <div className="display-window-status">
+        <Monitor size={34} />
+        <strong>Receiver klaar</strong>
+        <span>{peerId} - {quality}</span>
+        <small>Wachten op native capture frames</small>
+      </div>
     </main>
   );
 }

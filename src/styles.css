@@ -403,6 +403,15 @@ button:disabled {
   animation: stream-pan 1800ms linear infinite;
 }
 
+.preview-frame.receiver-needed {
+  outline: 1px solid rgba(220, 151, 32, 0.5);
+}
+
+.preview-frame.receiver-needed .screen-grid {
+  opacity: 0.18;
+  filter: grayscale(0.45);
+}
+
 @keyframes stream-pan {
   from { transform: translateX(-12%); }
   to { transform: translateX(12%); }
@@ -475,6 +484,99 @@ button:disabled {
 .preview-copy span {
   color: #b9c7d5;
   font-size: 13px;
+}
+
+.inline-action {
+  min-height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 7px 12px;
+  font-weight: 800;
+}
+
+.inline-action:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.display-window-shell {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: #05080c;
+  color: #fff;
+  position: relative;
+}
+
+.display-window-grid {
+  position: absolute;
+  inset: 22px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.display-window-grid.screen-count-1 {
+  grid-template-columns: 1fr;
+}
+
+.display-window-grid.screen-count-3 {
+  grid-template-columns: 1.2fr 0.8fr;
+}
+
+.display-window-screen {
+  min-height: 140px;
+  border: 1px solid rgba(142, 188, 255, 0.28);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 12px),
+    linear-gradient(135deg, rgba(42, 100, 160, 0.72), rgba(12, 22, 34, 0.92));
+  animation: stream-pan 2200ms linear infinite alternate;
+  padding: 22px;
+}
+
+.display-window-screen:first-child {
+  grid-row: span 2;
+}
+
+.display-window-grid.screen-count-1 .display-window-screen:first-child {
+  grid-row: auto;
+}
+
+.display-window-screen span {
+  color: rgba(255, 255, 255, 0.76);
+  font-weight: 900;
+}
+
+.display-window-status {
+  position: absolute;
+  left: 50%;
+  bottom: 32px;
+  width: min(460px, calc(100% - 44px));
+  transform: translateX(-50%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(5, 9, 14, 0.84);
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  padding: 18px;
+  text-align: center;
+}
+
+.display-window-status strong {
+  font-size: 18px;
+}
+
+.display-window-status span,
+.display-window-status small {
+  color: #b9c7d5;
 }
 
 .details-grid {

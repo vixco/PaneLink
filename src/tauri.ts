@@ -10,6 +10,8 @@ import {
 import type {
   AudioDevice,
   Capabilities,
+  DisplayWindowRequest,
+  DisplayWindowState,
   Peer,
   PermissionState,
   RemoteScreen,
@@ -21,6 +23,7 @@ import type {
 const isTauri = '__TAURI_INTERNALS__' in window;
 let browserSession: SessionSnapshot = fallbackSession;
 let browserStream: StreamState = fallbackStreamState;
+let browserDisplayWindow: Window | null = null;
 
 function withNow<T extends { updatedAt?: string }>(value: T): T {
   return { ...value, updatedAt: new Date().toISOString() };
@@ -183,6 +186,40 @@ export function stopStream() {
   }
 
   return call<StreamState>('stop_stream', withNow({ ...browserStream, status: 'idle' }));
+}
+
+export function openDisplayWindow(request: DisplayWindowRequest) {
+  if (!isTauri) {
+    const params = new URLSearchParams({
+      window: 'display',
+      peerId: request.peerId,
+      screens: String(Math.max(1, Math.min(request.screenCount, 3))),
+      quality: request.quality,
+    });
+    browserDisplayWindow = window.open(`/?${params.toString()}`, 'panelink-display', 'popup,width=1280,height=720');
+
+    return Promise.resolve<DisplayWindowState>({
+      attached: Boolean(browserDisplayWindow),
+      message: browserDisplayWindow ? 'Display window opened' : 'Display window was blocked by the browser',
+    });
+  }
+
+  return call<DisplayWindowState>(
+    'open_display_window',
+    { attached: false, message: 'Display window could not be opened' },
+    request,
+  ).then(() => ({ attached: true, message: 'Display window opened' }));
+}
+
+export function closeDisplayWindow() {
+  if (!isTauri) {
+    browserDisplayWindow?.close();
+    browserDisplayWindow = null;
+    return Promise.resolve<DisplayWindowState>({ attached: false, message: 'Display window closed' });
+  }
+
+  return call<DisplayWindowState>('close_display_window', { attached: false, message: 'Display window closed' })
+    .then(() => ({ attached: false, message: 'Display window closed' }));
 }
 
 export function addRemoteScreen(peerId: string) {

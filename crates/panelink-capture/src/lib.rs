@@ -14,9 +14,10 @@ pub fn current_capture_backend() -> CaptureBackend {
     {
         return CaptureBackend {
             name: "DXGI Desktop Duplication".into(),
-            available: true,
+            available: false,
             requires_permission: false,
-            note: "Frame capture backend planned through the windows crate.".into(),
+            note: "Native frame capture is not wired yet; this build cannot show remote pixels."
+                .into(),
         };
     }
 
@@ -24,9 +25,10 @@ pub fn current_capture_backend() -> CaptureBackend {
     {
         return CaptureBackend {
             name: "ScreenCaptureKit".into(),
-            available: true,
+            available: false,
             requires_permission: true,
-            note: "Requires Screen Recording permission before live capture.".into(),
+            note: "ScreenCaptureKit permission is required, but frame transport is not wired yet."
+                .into(),
         };
     }
 

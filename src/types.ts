@@ -90,6 +90,17 @@ export type StartStreamRequest = {
   quality: StreamState['quality'];
 };
 
+export type DisplayWindowRequest = {
+  peerId: string;
+  screenCount: number;
+  quality: StreamState['quality'];
+};
+
+export type DisplayWindowState = {
+  attached: boolean;
+  message: string;
+};
+
 export type RemoteScreen = {
   id: string;
   name: string;

@@ -2,6 +2,7 @@ use panelink_core::{
     AudioCapabilities, AudioDevice, Capabilities, CaptureState, DisplayCapabilities,
     PermissionState, PermissionStatus, RoutingState, SessionSnapshot, VirtualDisplayState,
 };
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 #[tauri::command]
 fn list_peers() -> Vec<panelink_core::Peer> {
@@ -61,6 +62,46 @@ fn start_stream(
 #[tauri::command]
 fn stop_stream() -> panelink_transport::StreamState {
     panelink_transport::stop_stream()
+}
+
+#[tauri::command]
+fn open_display_window(
+    app: AppHandle,
+    peer_id: Option<String>,
+    screen_count: Option<u8>,
+    quality: Option<String>,
+) -> Result<(), String> {
+    let peer_id = peer_id.unwrap_or_else(|| "unknown".into());
+    let screen_count = screen_count.unwrap_or(1).clamp(1, 3);
+    let quality = quality.unwrap_or_else(|| "Low latency".into()).replace(' ', "%20");
+    let url = format!(
+        "index.html?window=display&peerId={peer_id}&screens={screen_count}&quality={quality}"
+    );
+
+    if let Some(window) = app.get_webview_window("display") {
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    WebviewWindowBuilder::new(&app, "display", WebviewUrl::App(url.into()))
+        .title("PaneLink Display")
+        .inner_size(1280.0, 720.0)
+        .min_inner_size(720.0, 420.0)
+        .resizable(true)
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn close_display_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("display") {
+        window.close().map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -129,6 +170,8 @@ fn get_capabilities() -> Capabilities {
         display: DisplayCapabilities {
             capture: if capture.available {
                 CaptureState::Available
+            } else if capture.requires_permission {
+                CaptureState::PermissionRequired
             } else {
                 CaptureState::Stub
             },
@@ -186,6 +229,8 @@ fn main() {
             disconnect_peer,
             start_stream,
             stop_stream,
+            open_display_window,
+            close_display_window,
             add_remote_screen,
             remove_remote_screen,
             ping_peer,
