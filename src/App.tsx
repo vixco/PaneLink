@@ -25,6 +25,7 @@ import {
   listPeers,
   openDisplayWindow,
   removeRemoteScreen,
+  runNativeSetup,
   scanPeers,
   startStream,
   stopStream,
@@ -33,6 +34,7 @@ import type {
   AudioDevice,
   Capabilities,
   DisplayWindowRequest,
+  NativeSetupState,
   Peer,
   PermissionState,
   RemoteScreen,
@@ -112,6 +114,7 @@ function ControlApp() {
   const [pairingError, setPairingError] = useState('');
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ state: 'idle', label: 'Updates ready' });
   const [displayWindow, setDisplayWindow] = useState({ attached: false, message: 'Display window closed' });
+  const [setupStatus, setSetupStatus] = useState<NativeSetupState | null>(null);
 
   useEffect(() => {
     void loadEverything(true);
@@ -147,6 +150,19 @@ function ControlApp() {
       screenIds: nextSession.screens.map((screen) => screen.id),
       quality,
     });
+
+    if (!displayPipelineReady) {
+      await closeDisplayWindow();
+      const nextSetupStatus = await runNativeSetup();
+      setSetupStatus(nextSetupStatus);
+      setDisplayWindow({
+        attached: false,
+        message: nextSetupStatus.message,
+      });
+
+      return nextStream;
+    }
+
     const nextDisplayWindow = await openDisplayWindow({
       peerId: peer.id,
       screenCount: nextSession.screens.length,
@@ -251,6 +267,14 @@ function ControlApp() {
 
     setIsBusy(true);
     try {
+      if (!displayPipelineReady) {
+        await closeDisplayWindow();
+        const nextSetupStatus = await runNativeSetup();
+        setSetupStatus(nextSetupStatus);
+        setDisplayWindow({ attached: false, message: nextSetupStatus.message });
+        return;
+      }
+
       const nextDisplayWindow = await openDisplayWindow({
         peerId: selectedPeer.id,
         screenCount: Math.max(screens.length, 1),
@@ -420,7 +444,7 @@ function ControlApp() {
             <div className="preview-copy">
               <Monitor size={30} />
               <strong>
-                {receiverReady ? 'Receiver window open' : isStreaming ? 'Display nog niet aangesloten' : isConnected ? 'Stream starten...' : 'Wacht op verbinding'}
+                {receiverReady ? 'Receiver window open' : isStreaming ? 'Setup nodig' : isConnected ? 'Stream starten...' : 'Wacht op verbinding'}
               </strong>
               <span>
                 {receiverReady && displayPipelineReady
@@ -428,7 +452,7 @@ function ControlApp() {
                   : receiverReady
                     ? 'Receiver staat open. Echte schermpixels wachten nog op native capture en virtual display driver.'
                     : isStreaming
-                      ? 'Transport loopt, maar er is nog geen display window zichtbaar.'
+                      ? setupStatus?.message ?? 'PaneLink start automatisch de native setup voordat er een display window wordt geopend.'
                       : isConnected
                         ? 'De stream-engine wordt gestart.'
                         : 'Klik links op verbinden.'}
@@ -517,6 +541,7 @@ function ControlApp() {
           <small className="muted">Update: {updateStatus.label}</small>
           <small className="muted">Peer ID: {data.capabilities?.peerId ?? 'laden...'}</small>
           <small className="muted">Display window: {displayWindow.attached ? 'open' : 'closed'}</small>
+          <small className="muted">Setup: {setupStatus?.message ?? 'niet gestart'}</small>
           <small className="muted">Capture: {data.capabilities?.display.capture ?? 'laden...'}</small>
           <small className="muted">Virtual display: {data.capabilities?.display.virtualDisplay ?? 'laden...'}</small>
           {data.permissions.slice(0, 2).map((permission) => (

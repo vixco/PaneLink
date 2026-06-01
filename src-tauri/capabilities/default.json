@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default desktop capability for PaneLink",
-  "windows": ["main"],
+  "windows": ["main", "display"],
   "permissions": ["core:default", "updater:default", "process:default"]
 }

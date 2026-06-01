@@ -12,6 +12,7 @@ import type {
   Capabilities,
   DisplayWindowRequest,
   DisplayWindowState,
+  NativeSetupState,
   Peer,
   PermissionState,
   RemoteScreen,
@@ -222,6 +223,16 @@ export function closeDisplayWindow() {
 
   return call<DisplayWindowState>('close_display_window', { attached: false, message: 'Display window closed' })
     .then(() => ({ attached: false, message: 'Display window closed' }));
+}
+
+export function runNativeSetup() {
+  return call<NativeSetupState>('run_native_setup', {
+    started: false,
+    platform: 'browser',
+    message: 'Native setup is only available in the installed PaneLink app.',
+    actions: [],
+    requiresRestart: false,
+  });
 }
 
 export function addRemoteScreen(peerId: string) {

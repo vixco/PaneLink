@@ -101,6 +101,14 @@ export type DisplayWindowState = {
   message: string;
 };
 
+export type NativeSetupState = {
+  started: boolean;
+  platform: string;
+  message: string;
+  actions: string[];
+  requiresRestart: boolean;
+};
+
 export type RemoteScreen = {
   id: string;
   name: string;

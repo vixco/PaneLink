@@ -2,7 +2,18 @@ use panelink_core::{
     AudioCapabilities, AudioDevice, Capabilities, CaptureState, DisplayCapabilities,
     PermissionState, PermissionStatus, RoutingState, SessionSnapshot, VirtualDisplayState,
 };
+use serde::Serialize;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeSetupState {
+    started: bool,
+    platform: String,
+    message: String,
+    actions: Vec<String>,
+    requires_restart: bool,
+}
 
 #[tauri::command]
 fn list_peers() -> Vec<panelink_core::Peer> {
@@ -80,11 +91,14 @@ fn open_display_window(
     let screen_count = screen_count.unwrap_or(1).clamp(1, 3);
     let initial_width = if screen_count > 1 { 1440.0 } else { 1280.0 };
 
-    WebviewWindowBuilder::new(&app, "display", WebviewUrl::App("index.html".into()))
+    WebviewWindowBuilder::new(&app, "display", WebviewUrl::App("display.html".into()))
         .title("PaneLink Display")
         .inner_size(initial_width, 720.0)
         .min_inner_size(720.0, 420.0)
+        .closable(true)
+        .decorations(true)
         .resizable(true)
+        .visible(true)
         .build()
         .map_err(|error| error.to_string())?;
 
@@ -209,6 +223,58 @@ fn get_permissions() -> Vec<PermissionState> {
     ]
 }
 
+#[tauri::command]
+fn run_native_setup() -> NativeSetupState {
+    #[cfg(target_os = "macos")]
+    {
+        let screen_capture = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+            .status()
+            .is_ok();
+        let accessibility = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .status()
+            .is_ok();
+
+        NativeSetupState {
+            started: screen_capture || accessibility,
+            platform: "macos".into(),
+            message: "macOS privacy setup opened. Allow Screen Recording and Accessibility for PaneLink, then restart PaneLink.".into(),
+            actions: vec![
+                "Open Screen Recording permission".into(),
+                "Open Accessibility permission".into(),
+            ],
+            requires_restart: true,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        NativeSetupState {
+            started: true,
+            platform: "windows".into(),
+            message: "Windows runtime setup checked. Receiver windows are disabled until native frame capture and transport are installed in the app.".into(),
+            actions: vec![
+                "Verified packaged display window permissions".into(),
+                "Skipped opening receiver window because native frames are not available yet".into(),
+            ],
+            requires_restart: false,
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        NativeSetupState {
+            started: false,
+            platform: std::env::consts::OS.into(),
+            message: "This platform is not supported by the PaneLink native setup assistant."
+                .into(),
+            actions: Vec::new(),
+            requires_restart: false,
+        }
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
@@ -235,7 +301,8 @@ fn main() {
             get_input_backend_report,
             submit_input_batch,
             get_capabilities,
-            get_permissions
+            get_permissions,
+            run_native_setup
         ])
         .run(tauri::generate_context!())
         .expect("failed to run PaneLink");
