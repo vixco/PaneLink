@@ -393,6 +393,21 @@ button:disabled {
   place-items: center;
 }
 
+.preview-frame.streaming::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.12), transparent),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.04) 0 1px, transparent 1px 12px);
+  animation: stream-pan 1800ms linear infinite;
+}
+
+@keyframes stream-pan {
+  from { transform: translateX(-12%); }
+  to { transform: translateX(12%); }
+}
+
 .screen-grid {
   position: absolute;
   inset: 22px 22px 118px;

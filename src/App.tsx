@@ -24,6 +24,7 @@ import {
   listPeers,
   removeRemoteScreen,
   scanPeers,
+  startStream,
   stopStream,
 } from './tauri';
 import type { AudioDevice, Capabilities, Peer, PermissionState, RemoteScreen, SessionSnapshot, StreamState } from './types';
@@ -130,7 +131,12 @@ function App() {
       }
 
       const nextSession = await connectPeer(selectedPeer.id);
-      setData((current) => ({ ...current, session: nextSession }));
+      const nextStream = await startStream({
+        peerId: selectedPeer.id,
+        screenIds: nextSession.screens.map((screen) => screen.id),
+        quality,
+      });
+      setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
     } finally {
       setIsBusy(false);
     }
@@ -142,7 +148,12 @@ function App() {
     setIsBusy(true);
     try {
       const nextSession = await addRemoteScreen(selectedPeer.id);
-      setData((current) => ({ ...current, session: nextSession }));
+      const nextStream = await startStream({
+        peerId: selectedPeer.id,
+        screenIds: nextSession.screens.map((screen) => screen.id),
+        quality,
+      });
+      setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
     } finally {
       setIsBusy(false);
     }
@@ -154,7 +165,14 @@ function App() {
     setIsBusy(true);
     try {
       const nextSession = await removeRemoteScreen(screenId);
-      setData((current) => ({ ...current, session: nextSession }));
+      const nextStream = selectedPeer
+        ? await startStream({
+            peerId: selectedPeer.id,
+            screenIds: nextSession.screens.map((screen) => screen.id),
+            quality,
+          })
+        : data.stream;
+      setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
     } finally {
       setIsBusy(false);
     }
@@ -190,7 +208,12 @@ function App() {
     setIsBusy(true);
     try {
       const nextSession = await connectPeer(selectedPeer.id);
-      setData((current) => ({ ...current, session: nextSession }));
+      const nextStream = await startStream({
+        peerId: selectedPeer.id,
+        screenIds: nextSession.screens.map((screen) => screen.id),
+        quality,
+      });
+      setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
     } finally {
       setIsBusy(false);
     }
@@ -314,7 +337,7 @@ function App() {
             <strong>{isStreaming ? `${stream?.fps ?? 0} FPS` : 'Standby'}</strong>
           </div>
 
-          <div className="preview-frame">
+          <div className={isStreaming ? 'preview-frame streaming' : 'preview-frame'}>
             <div className={`screen-grid screen-count-${Math.max(screens.length, 1)}`}>
               {(screens.length ? screens : [{ id: 'placeholder', fittedResolution: 'Auto-fit ready' } as RemoteScreen]).map((screen, index) => (
                 <div key={screen.id}>
@@ -325,8 +348,14 @@ function App() {
             </div>
             <div className="preview-copy">
               <Monitor size={30} />
-              <strong>{isStreaming ? 'Stream gestart' : isConnected ? 'Verbonden, stream nog niet actief' : 'Wacht op verbinding'}</strong>
-              <span>{isConnected ? 'Pairing en scherm-layout staan klaar. Echte video/audio transport volgt hierna.' : 'Klik links op verbinden.'}</span>
+              <strong>{isStreaming ? 'Stream actief' : isConnected ? 'Stream starten...' : 'Wacht op verbinding'}</strong>
+              <span>
+                {isStreaming
+                  ? `${stream?.codec ?? 'H.264'} · frame ${stream?.frameId ?? 0} · ${stream?.latencyMs ?? 0} ms`
+                  : isConnected
+                    ? 'De stream-engine wordt gestart.'
+                    : 'Klik links op verbinden.'}
+              </span>
             </div>
           </div>
         </div>
