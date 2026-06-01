@@ -54,6 +54,11 @@ fn get_stream_state() -> panelink_transport::StreamState {
 }
 
 #[tauri::command]
+fn get_frame_server_url() -> Result<String, String> {
+    panelink_capture::start_frame_server().map(|port| format!("http://127.0.0.1:{port}/frame"))
+}
+
+#[tauri::command]
 fn connect_peer(peer_id: String) -> Result<SessionSnapshot, panelink_transport::SessionError> {
     panelink_transport::connect_peer(peer_id)
 }
@@ -170,6 +175,10 @@ fn get_capabilities() -> Capabilities {
         ],
         transport: vec![
             panelink_transport::default_transport_plan().primary,
+            format!(
+                "PNG frame server on :{}",
+                panelink_capture::FRAME_SERVER_PORT
+            ),
             panelink_discovery::SERVICE_NAME.into(),
         ],
         audio: AudioCapabilities {
@@ -277,6 +286,13 @@ fn run_native_setup() -> NativeSetupState {
 
 fn main() {
     tauri::Builder::default()
+        .setup(|_app| {
+            if let Err(error) = panelink_capture::start_frame_server() {
+                eprintln!("PaneLink frame server startup failed: {error}");
+            }
+
+            Ok(())
+        })
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
@@ -284,6 +300,7 @@ fn main() {
             scan_peers,
             advertise_peer,
             issue_pairing_token,
+            get_frame_server_url,
             get_session_snapshot,
             get_transport_state,
             get_stream_state,

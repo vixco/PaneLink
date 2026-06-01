@@ -139,7 +139,7 @@ function ControlApp() {
   const isConnected = session?.status === 'connected' || session?.status === 'degraded';
   const isStreaming = stream?.status === 'streaming' || stream?.status === 'live';
   const displayPipelineReady = data.capabilities?.display.capture === 'available'
-    && data.capabilities?.display.virtualDisplay === 'available';
+    || data.capabilities?.display.capture === 'permission-required';
   const receiverReady = isStreaming && displayWindow.attached;
   const selectedPeerTrusted = selectedPeer ? trustedPeerIds.includes(selectedPeer.id) || selectedPeer.trusted : false;
   const localPairingCode = data.capabilities?.peerId ? pairingCodeForPeer(data.capabilities.peerId) : 'laden...';
@@ -150,6 +150,7 @@ function ControlApp() {
       screenIds: nextSession.screens.map((screen) => screen.id),
       quality,
     });
+    const frameUrl = frameUrlForPeer(peer);
 
     if (!displayPipelineReady) {
       await closeDisplayWindow();
@@ -165,6 +166,7 @@ function ControlApp() {
 
     const nextDisplayWindow = await openDisplayWindow({
       peerId: peer.id,
+      peerAddress: frameUrl,
       screenCount: nextSession.screens.length,
       quality,
     });
@@ -277,6 +279,7 @@ function ControlApp() {
 
       const nextDisplayWindow = await openDisplayWindow({
         peerId: selectedPeer.id,
+        peerAddress: frameUrlForPeer(selectedPeer),
         screenCount: Math.max(screens.length, 1),
         quality,
       });
@@ -584,8 +587,8 @@ function DisplayWindow() {
       <div className="display-window-status">
         <Monitor size={34} />
         <strong>Nog geen beeld ontvangen</strong>
-        <span>{config.peerId} - {config.quality}</span>
-        <small>Deze build heeft nog geen native screen capture + frame transport.</small>
+      <span>{config.peerId} - {config.quality}</span>
+        <small>Frames: {config.peerAddress}</small>
       </div>
     </main>
   );
@@ -649,6 +652,7 @@ function readDisplayWindowConfig(): DisplayWindowRequest {
   const fromUrl = params.get('window') === 'display'
     ? {
         peerId: params.get('peerId') ?? 'unknown',
+        peerAddress: params.get('peerAddress') ?? '',
         screenCount: Number(params.get('screens') ?? 1),
         quality: (params.get('quality') ?? 'Low latency') as StreamState['quality'],
       }
@@ -667,7 +671,13 @@ function readDisplayWindowConfig(): DisplayWindowRequest {
     // Fall through to the default below.
   }
 
-  return { peerId: 'unknown', screenCount: 1, quality: 'Low latency' };
+  return { peerId: 'unknown', peerAddress: '', screenCount: 1, quality: 'Low latency' };
+}
+
+function frameUrlForPeer(peer: Peer) {
+  const host = peer.address.split(':')[0] || peer.address;
+
+  return `http://${host}:48171/frame`;
 }
 
 export default App;

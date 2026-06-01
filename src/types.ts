@@ -92,6 +92,7 @@ export type StartStreamRequest = {
 
 export type DisplayWindowRequest = {
   peerId: string;
+  peerAddress: string;
   screenCount: number;
   quality: StreamState['quality'];
 };

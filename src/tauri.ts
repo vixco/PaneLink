@@ -196,6 +196,7 @@ export function openDisplayWindow(request: DisplayWindowRequest) {
     const params = new URLSearchParams({
       window: 'display',
       peerId: request.peerId,
+      peerAddress: request.peerAddress,
       screens: String(Math.max(1, Math.min(request.screenCount, 3))),
       quality: request.quality,
     });
@@ -233,6 +234,10 @@ export function runNativeSetup() {
     actions: [],
     requiresRestart: false,
   });
+}
+
+export function getFrameServerUrl() {
+  return call<string>('get_frame_server_url', 'http://127.0.0.1:48171/frame');
 }
 
 export function addRemoteScreen(peerId: string) {

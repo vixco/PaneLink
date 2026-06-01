@@ -7,3 +7,5 @@ repository.workspace = true
 
 [dependencies]
 serde.workspace = true
+tiny_http.workspace = true
+xcap.workspace = true
