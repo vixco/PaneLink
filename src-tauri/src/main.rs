@@ -73,7 +73,9 @@ fn open_display_window(
 ) -> Result<(), String> {
     let peer_id = peer_id.unwrap_or_else(|| "unknown".into());
     let screen_count = screen_count.unwrap_or(1).clamp(1, 3);
-    let quality = quality.unwrap_or_else(|| "Low latency".into()).replace(' ', "%20");
+    let quality = quality
+        .unwrap_or_else(|| "Low latency".into())
+        .replace(' ', "%20");
     let url = format!(
         "index.html?window=display&peerId={peer_id}&screens={screen_count}&quality={quality}"
     );
