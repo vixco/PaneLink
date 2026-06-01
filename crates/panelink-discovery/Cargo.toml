@@ -8,4 +8,5 @@ repository.workspace = true
 [dependencies]
 panelink-core.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 uuid.workspace = true

@@ -5,7 +5,14 @@ use panelink_core::{
 
 #[tauri::command]
 fn list_peers() -> Vec<panelink_core::Peer> {
-    panelink_discovery::list_cached_peers()
+    panelink_discovery::scan_lan_peers(std::time::Duration::from_millis(350))
+        .unwrap_or_else(|_| panelink_discovery::list_cached_peers())
+}
+
+#[tauri::command]
+fn scan_peers() -> Vec<panelink_core::Peer> {
+    panelink_discovery::scan_lan_peers(std::time::Duration::from_millis(900))
+        .unwrap_or_else(|_| panelink_discovery::list_cached_peers())
 }
 
 #[tauri::command]
@@ -169,6 +176,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             list_peers,
+            scan_peers,
             advertise_peer,
             issue_pairing_token,
             get_session_snapshot,

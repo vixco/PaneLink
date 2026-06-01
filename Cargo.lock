@@ -2310,7 +2310,7 @@ dependencies = [
 
 [[package]]
 name = "panelink"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "panelink-audio",
  "panelink-capture",
@@ -2356,6 +2356,7 @@ version = "0.1.0"
 dependencies = [
  "panelink-core",
  "serde",
+ "serde_json",
  "uuid",
 ]
 

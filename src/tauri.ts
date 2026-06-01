@@ -82,7 +82,11 @@ export function getCapabilities() {
 }
 
 export function listPeers() {
-  return call<Peer[]>('list_peers', fallbackPeers);
+  return call<Peer[]>('list_peers', isTauri ? [] : fallbackPeers);
+}
+
+export function scanPeers() {
+  return call<Peer[]>('scan_peers', isTauri ? [] : fallbackPeers);
 }
 
 export function getSession() {

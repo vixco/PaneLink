@@ -2,8 +2,10 @@ use panelink_core::{local_peer_id, OperatingSystem, Peer, PeerStatus};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    io,
+    net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     sync::{Mutex, OnceLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
@@ -11,6 +13,7 @@ pub const SERVICE_NAME: &str = "_panelink._udp.local";
 pub const DEFAULT_PORT: u16 = 48170;
 pub const DEFAULT_PEER_TTL: Duration = Duration::from_secs(30);
 pub const PAIRING_TOKEN_TTL: Duration = Duration::from_secs(5 * 60);
+const DISCOVERY_MAGIC: &[u8] = b"PANELINK_DISCOVERY_V1\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveryConfig {
@@ -50,10 +53,10 @@ impl AdvertisementPayload {
             peer_id: local_peer_id(),
             peer_name: local_peer_name(),
             os: local_operating_system(),
-            address: "127.0.0.1".into(),
+            address: local_lan_address().unwrap_or_else(|| "0.0.0.0".into()),
             port: config.port,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
-            transport: "in-process-lan-session".into(),
+            transport: "udp-lan-discovery".into(),
             pairing_required: true,
         }
     }
@@ -125,6 +128,7 @@ impl PeerRegistry {
         advertisement: AdvertisementPayload,
         seen_at_unix_ms: u64,
     ) -> CachedPeer {
+        let advertisement = normalize_advertisement(advertisement);
         let existing_first_seen = self
             .peers
             .get(&advertisement.peer_id)
@@ -152,6 +156,7 @@ impl PeerRegistry {
         let mut peers = self
             .peers
             .values()
+            .filter(|cached| cached.peer.id != local_peer_id())
             .map(|cached| cached.peer.clone())
             .collect::<Vec<_>>();
 
@@ -207,6 +212,51 @@ impl DiscoveryService {
         self.registry.upsert(advertisement)
     }
 
+    pub fn scan_lan(&mut self, timeout: Duration) -> io::Result<Vec<Peer>> {
+        let local = self.advertise_local_peer();
+        let packet = encode_advertisement(&local)?;
+        let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, self.config.port))?;
+        socket.set_broadcast(true)?;
+        socket.set_read_timeout(Some(Duration::from_millis(60)))?;
+
+        socket.send_to(
+            &packet,
+            SocketAddrV4::new(Ipv4Addr::BROADCAST, self.config.port),
+        )?;
+
+        let started_at = Instant::now();
+        let mut buffer = [0_u8; 4096];
+
+        while started_at.elapsed() < timeout {
+            match socket.recv_from(&mut buffer) {
+                Ok((size, from)) => {
+                    if let Some(mut advertisement) = decode_advertisement(&buffer[..size]) {
+                        if advertisement.peer_id == local.peer_id {
+                            continue;
+                        }
+
+                        if is_unspecified_or_loopback(&advertisement.address) {
+                            advertisement.address = from.ip().to_string();
+                        }
+
+                        self.ingest_peer(advertisement);
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Ok(self.list_cached_peers())
+    }
+
     pub fn list_cached_peers(&mut self) -> Vec<Peer> {
         self.registry.upsert(self.local_advertisement.clone());
         self.registry.expire_stale();
@@ -230,6 +280,10 @@ pub fn advertise_payload() -> AdvertisementPayload {
 
 pub fn list_cached_peers() -> Vec<Peer> {
     with_discovery_service(|service| service.list_cached_peers())
+}
+
+pub fn scan_lan_peers(timeout: Duration) -> io::Result<Vec<Peer>> {
+    with_discovery_service(|service| service.scan_lan(timeout))
 }
 
 pub fn ingest_peer_advertisement(advertisement: AdvertisementPayload) -> CachedPeer {
@@ -262,6 +316,43 @@ fn peer_from_advertisement(advertisement: &AdvertisementPayload, status: PeerSta
         trusted: !advertisement.pairing_required,
         latency_ms: 0,
     }
+}
+
+fn encode_advertisement(advertisement: &AdvertisementPayload) -> io::Result<Vec<u8>> {
+    let mut packet = DISCOVERY_MAGIC.to_vec();
+    let body = serde_json::to_vec(advertisement).map_err(io::Error::other)?;
+    packet.extend(body);
+    Ok(packet)
+}
+
+fn decode_advertisement(packet: &[u8]) -> Option<AdvertisementPayload> {
+    let body = packet.strip_prefix(DISCOVERY_MAGIC)?;
+    serde_json::from_slice(body).ok()
+}
+
+fn normalize_advertisement(mut advertisement: AdvertisementPayload) -> AdvertisementPayload {
+    if is_unspecified_or_loopback(&advertisement.address) {
+        advertisement.address = "0.0.0.0".into();
+    }
+
+    advertisement
+}
+
+fn is_unspecified_or_loopback(address: &str) -> bool {
+    address == "0.0.0.0" || address == "127.0.0.1" || address == "::1"
+}
+
+fn local_lan_address() -> Option<String> {
+    UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+        .ok()
+        .and_then(|socket| {
+            socket
+                .connect(SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 80))
+                .ok()?;
+            socket.local_addr().ok()
+        })
+        .map(|address| address.ip().to_string())
+        .filter(|address| !is_unspecified_or_loopback(address))
 }
 
 fn local_operating_system() -> OperatingSystem {
@@ -299,7 +390,7 @@ mod tests {
             address: "192.168.1.20".into(),
             port: DEFAULT_PORT,
             app_version: "0.1.0".into(),
-            transport: "in-process-lan-session".into(),
+            transport: "udp-lan-discovery".into(),
             pairing_required: true,
         }
     }
@@ -312,7 +403,8 @@ mod tests {
 
         assert_eq!(first.peer_id, second.peer_id);
         assert_eq!(first.service, SERVICE_NAME);
-        assert_eq!(first.endpoint(), format!("127.0.0.1:{}", DEFAULT_PORT));
+        assert_eq!(first.port, DEFAULT_PORT);
+        assert_ne!(first.endpoint(), format!("127.0.0.1:{}", DEFAULT_PORT));
         assert!(first.pairing_required);
     }
 
@@ -339,5 +431,14 @@ mod tests {
         assert!(!token.token.is_empty());
         assert!(!token.is_expired_at(10_499));
         assert!(token.is_expired_at(10_500));
+    }
+
+    #[test]
+    fn discovery_packets_roundtrip() {
+        let advertisement = advertisement("peer-a", "Desk");
+        let packet = encode_advertisement(&advertisement).expect("packet should encode");
+        let decoded = decode_advertisement(&packet).expect("packet should decode");
+
+        assert_eq!(decoded, advertisement);
     }
 }
