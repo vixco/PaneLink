@@ -1,0 +1,33 @@
+[workspace]
+members = [
+  "crates/panelink-core",
+  "crates/panelink-discovery",
+  "crates/panelink-transport",
+  "crates/panelink-capture",
+  "crates/panelink-audio",
+  "crates/panelink-input",
+  "src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/vixco/PaneLink"
+homepage = "https://github.com/vixco/PaneLink"
+authors = ["PaneLink contributors"]
+
+[workspace.dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2.9", features = [] }
+tauri-build = { version = "2.5", features = [] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
+cpal = "0.16"
+panelink-core = { path = "crates/panelink-core" }
+panelink-discovery = { path = "crates/panelink-discovery" }
+panelink-transport = { path = "crates/panelink-transport" }
+panelink-capture = { path = "crates/panelink-capture" }
+panelink-audio = { path = "crates/panelink-audio" }
+panelink-input = { path = "crates/panelink-input" }
