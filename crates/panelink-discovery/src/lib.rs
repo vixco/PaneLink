@@ -219,10 +219,9 @@ impl DiscoveryService {
         socket.set_broadcast(true)?;
         socket.set_read_timeout(Some(Duration::from_millis(60)))?;
 
-        socket.send_to(
-            &packet,
-            SocketAddrV4::new(Ipv4Addr::BROADCAST, self.config.port),
-        )?;
+        for target in discovery_targets(self.config.port) {
+            let _ = socket.send_to(&packet, target);
+        }
 
         let started_at = Instant::now();
         let mut buffer = [0_u8; 4096];
@@ -240,6 +239,7 @@ impl DiscoveryService {
                         }
 
                         self.ingest_peer(advertisement);
+                        let _ = socket.send_to(&packet, from);
                     }
                 }
                 Err(error)
@@ -355,6 +355,22 @@ fn local_lan_address() -> Option<String> {
         .filter(|address| !is_unspecified_or_loopback(address))
 }
 
+fn discovery_targets(port: u16) -> Vec<SocketAddrV4> {
+    let mut targets = vec![SocketAddrV4::new(Ipv4Addr::BROADCAST, port)];
+
+    if let Some(address) = local_lan_address().and_then(|address| address.parse::<Ipv4Addr>().ok())
+    {
+        let octets = address.octets();
+        let directed_broadcast = Ipv4Addr::new(octets[0], octets[1], octets[2], 255);
+
+        if directed_broadcast != Ipv4Addr::BROADCAST {
+            targets.push(SocketAddrV4::new(directed_broadcast, port));
+        }
+    }
+
+    targets
+}
+
 fn local_operating_system() -> OperatingSystem {
     if cfg!(target_os = "macos") {
         OperatingSystem::MacOs
@@ -440,5 +456,12 @@ mod tests {
         let decoded = decode_advertisement(&packet).expect("packet should decode");
 
         assert_eq!(decoded, advertisement);
+    }
+
+    #[test]
+    fn discovery_targets_include_global_broadcast() {
+        let targets = discovery_targets(DEFAULT_PORT);
+
+        assert!(targets.contains(&SocketAddrV4::new(Ipv4Addr::BROADCAST, DEFAULT_PORT)));
     }
 }

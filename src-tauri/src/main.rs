@@ -5,13 +5,13 @@ use panelink_core::{
 
 #[tauri::command]
 fn list_peers() -> Vec<panelink_core::Peer> {
-    panelink_discovery::scan_lan_peers(std::time::Duration::from_millis(350))
+    panelink_discovery::scan_lan_peers(std::time::Duration::from_millis(600))
         .unwrap_or_else(|_| panelink_discovery::list_cached_peers())
 }
 
 #[tauri::command]
 fn scan_peers() -> Vec<panelink_core::Peer> {
-    panelink_discovery::scan_lan_peers(std::time::Duration::from_millis(900))
+    panelink_discovery::scan_lan_peers(std::time::Duration::from_millis(1500))
         .unwrap_or_else(|_| panelink_discovery::list_cached_peers())
 }
 
