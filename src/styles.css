@@ -101,6 +101,37 @@ button { font: inherit; }
   padding: 18px;
 }
 
+.hero-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+}
+
+.pairing-code-card {
+  min-width: 198px;
+  border: 1px solid rgba(23, 105, 224, 0.25);
+  border-radius: 8px;
+  background: #edf4ff;
+  display: grid;
+  gap: 2px;
+  padding: 10px 12px;
+}
+
+.pairing-code-card span,
+.pairing-code-card small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.pairing-code-card strong {
+  color: var(--blue);
+  font-size: 30px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
 .section-label {
   color: var(--blue);
   font-size: 11px;
@@ -565,6 +596,15 @@ button:disabled {
   }
 
   .scan-button {
+    width: 100%;
+  }
+
+  .hero-actions {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .pairing-code-card {
     width: 100%;
   }
 

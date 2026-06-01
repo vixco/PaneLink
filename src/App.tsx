@@ -176,7 +176,7 @@ function App() {
     const enteredCode = pairingCode.replace(/\D/g, '');
 
     if (enteredCode !== expectedCode) {
-      setPairingError('Code klopt niet. Kijk op het andere apparaat bij Status.');
+      setPairingError('Code klopt niet. Gebruik de grote "Jouw pairing code" van het andere apparaat.');
       return;
     }
 
@@ -220,10 +220,17 @@ function App() {
             Zorg dat PaneLink op beide apparaten open staat. De app scant automatisch je lokale netwerk.
           </p>
         </div>
-        <button className="scan-button" disabled={isScanning} onClick={() => loadEverything(true)}>
-          {isScanning ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
-          Scan opnieuw
-        </button>
+        <div className="hero-actions">
+          <div className="pairing-code-card" aria-live="polite">
+            <span>Jouw pairing code</span>
+            <strong>{localPairingCode}</strong>
+            <small>Typ deze code op het andere apparaat.</small>
+          </div>
+          <button className="scan-button" disabled={isScanning} onClick={() => loadEverything(true)}>
+            {isScanning ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
+            Scan opnieuw
+          </button>
+        </div>
       </section>
 
       <section className="connection-layout">
@@ -263,7 +270,7 @@ function App() {
           {selectedPeer && pairingPeerId === selectedPeer.id && (
             <div className="pairing-box">
               <strong>Voer de code van {selectedPeer.name} in</strong>
-              <span>Open PaneLink op dat apparaat en kijk bij Status naar Pairing code.</span>
+              <span>Open PaneLink op dat apparaat. De code staat bovenaan als "Jouw pairing code".</span>
               <input
                 autoFocus
                 inputMode="numeric"
