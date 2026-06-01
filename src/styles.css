@@ -513,6 +513,11 @@ button:disabled {
   position: relative;
 }
 
+.display-window-shell.boot {
+  display: grid;
+  place-items: center;
+}
+
 .display-window-grid {
   position: absolute;
   inset: 22px;
@@ -534,10 +539,8 @@ button:disabled {
   border: 1px solid rgba(142, 188, 255, 0.28);
   border-radius: 8px;
   background:
-    linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent),
     repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 12px),
     linear-gradient(135deg, rgba(42, 100, 160, 0.72), rgba(12, 22, 34, 0.92));
-  animation: stream-pan 2200ms linear infinite alternate;
   padding: 22px;
 }
 
@@ -551,7 +554,15 @@ button:disabled {
 
 .display-window-screen span {
   color: rgba(255, 255, 255, 0.76);
+  display: block;
   font-weight: 900;
+}
+
+.display-window-screen small {
+  color: rgba(255, 255, 255, 0.5);
+  display: block;
+  font-size: 12px;
+  margin-top: 6px;
 }
 
 .display-window-status {

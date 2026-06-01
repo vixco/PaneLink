@@ -189,6 +189,8 @@ export function stopStream() {
 }
 
 export function openDisplayWindow(request: DisplayWindowRequest) {
+  saveDisplayWindowRequest(request);
+
   if (!isTauri) {
     const params = new URLSearchParams({
       window: 'display',
@@ -269,4 +271,12 @@ export function removeRemoteScreen(screenId: string) {
   }
 
   return call<SessionSnapshot>('remove_remote_screen', fallback, { screenId });
+}
+
+function saveDisplayWindowRequest(request: DisplayWindowRequest) {
+  try {
+    window.localStorage.setItem('panelink.displayWindow', JSON.stringify(request));
+  } catch (error) {
+    console.warn('PaneLink display config could not be saved', error);
+  }
 }

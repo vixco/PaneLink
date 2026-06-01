@@ -29,7 +29,16 @@ import {
   startStream,
   stopStream,
 } from './tauri';
-import type { AudioDevice, Capabilities, Peer, PermissionState, RemoteScreen, SessionSnapshot, StreamState } from './types';
+import type {
+  AudioDevice,
+  Capabilities,
+  DisplayWindowRequest,
+  Peer,
+  PermissionState,
+  RemoteScreen,
+  SessionSnapshot,
+  StreamState,
+} from './types';
 import { checkAndInstallUpdate, type UpdateStatus } from './updater';
 
 type AppData = {
@@ -42,10 +51,41 @@ type AppData = {
 };
 
 const qualities: StreamState['quality'][] = ['Low latency', 'Balanced', 'Sharp'];
-const isDisplayWindow = new URLSearchParams(window.location.search).get('window') === 'display';
+const isTauriRuntime = '__TAURI_INTERNALS__' in window;
+const queryIsDisplayWindow = new URLSearchParams(window.location.search).get('window') === 'display';
 
 function App() {
-  if (isDisplayWindow) {
+  const [windowMode, setWindowMode] = useState<'loading' | 'control' | 'display'>(
+    queryIsDisplayWindow ? 'display' : isTauriRuntime ? 'loading' : 'control',
+  );
+
+  useEffect(() => {
+    if (queryIsDisplayWindow || !isTauriRuntime) return;
+
+    let cancelled = false;
+
+    import('@tauri-apps/api/window')
+      .then(({ getCurrentWindow }) => {
+        if (!cancelled) {
+          setWindowMode(getCurrentWindow().label === 'display' ? 'display' : 'control');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setWindowMode('control');
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (windowMode === 'loading') {
+    return <DisplayBoot />;
+  }
+
+  if (windowMode === 'display') {
     return <DisplayWindow />;
   }
 
@@ -491,11 +531,20 @@ function ControlApp() {
 }
 
 function DisplayWindow() {
-  const params = new URLSearchParams(window.location.search);
-  const peerId = params.get('peerId') ?? 'unknown';
-  const quality = params.get('quality') ?? 'Low latency';
-  const screenCount = Math.max(1, Math.min(Number(params.get('screens') ?? 1), 3));
+  const [config, setConfig] = useState(readDisplayWindowConfig);
+  const screenCount = Math.max(1, Math.min(Number(config.screenCount || 1), 3));
   const screens = Array.from({ length: screenCount }, (_, index) => index + 1);
+
+  useEffect(() => {
+    const refreshConfig = () => setConfig(readDisplayWindowConfig());
+    const timer = window.setInterval(refreshConfig, 700);
+    window.addEventListener('storage', refreshConfig);
+
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('storage', refreshConfig);
+    };
+  }, []);
 
   return (
     <main className="display-window-shell">
@@ -503,14 +552,27 @@ function DisplayWindow() {
         {screens.map((screen) => (
           <div className="display-window-screen" key={screen}>
             <span>Screen {screen}</span>
+            <small>Geen desktopframes</small>
           </div>
         ))}
       </section>
       <div className="display-window-status">
         <Monitor size={34} />
-        <strong>Receiver klaar</strong>
-        <span>{peerId} - {quality}</span>
-        <small>Wachten op native capture frames</small>
+        <strong>Nog geen beeld ontvangen</strong>
+        <span>{config.peerId} - {config.quality}</span>
+        <small>Deze build heeft nog geen native screen capture + frame transport.</small>
+      </div>
+    </main>
+  );
+}
+
+function DisplayBoot() {
+  return (
+    <main className="display-window-shell boot">
+      <div className="display-window-status">
+        <Loader2 className="spin" size={30} />
+        <strong>PaneLink openen</strong>
+        <small>Window wordt klaargezet.</small>
       </div>
     </main>
   );
@@ -555,6 +617,32 @@ function loadTrustedPeerIds() {
 
 function saveTrustedPeerIds(peerIds: string[]) {
   window.localStorage.setItem('panelink.trustedPeerIds', JSON.stringify(peerIds));
+}
+
+function readDisplayWindowConfig(): DisplayWindowRequest {
+  const params = new URLSearchParams(window.location.search);
+  const fromUrl = params.get('window') === 'display'
+    ? {
+        peerId: params.get('peerId') ?? 'unknown',
+        screenCount: Number(params.get('screens') ?? 1),
+        quality: (params.get('quality') ?? 'Low latency') as StreamState['quality'],
+      }
+    : null;
+
+  if (fromUrl) {
+    return fromUrl;
+  }
+
+  try {
+    const saved = window.localStorage.getItem('panelink.displayWindow');
+    if (saved) {
+      return JSON.parse(saved) as DisplayWindowRequest;
+    }
+  } catch {
+    // Fall through to the default below.
+  }
+
+  return { peerId: 'unknown', screenCount: 1, quality: 'Low latency' };
 }
 
 export default App;

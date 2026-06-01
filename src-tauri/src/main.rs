@@ -67,28 +67,22 @@ fn stop_stream() -> panelink_transport::StreamState {
 #[tauri::command]
 fn open_display_window(
     app: AppHandle,
-    peer_id: Option<String>,
     screen_count: Option<u8>,
-    quality: Option<String>,
+    _peer_id: Option<String>,
+    _quality: Option<String>,
 ) -> Result<(), String> {
-    let peer_id = peer_id.unwrap_or_else(|| "unknown".into());
-    let screen_count = screen_count.unwrap_or(1).clamp(1, 3);
-    let quality = quality
-        .unwrap_or_else(|| "Low latency".into())
-        .replace(' ', "%20");
-    let url = format!(
-        "index.html?window=display&peerId={peer_id}&screens={screen_count}&quality={quality}"
-    );
-
     if let Some(window) = app.get_webview_window("display") {
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(());
     }
 
-    WebviewWindowBuilder::new(&app, "display", WebviewUrl::App(url.into()))
+    let screen_count = screen_count.unwrap_or(1).clamp(1, 3);
+    let initial_width = if screen_count > 1 { 1440.0 } else { 1280.0 };
+
+    WebviewWindowBuilder::new(&app, "display", WebviewUrl::App("index.html".into()))
         .title("PaneLink Display")
-        .inner_size(1280.0, 720.0)
+        .inner_size(initial_width, 720.0)
         .min_inner_size(720.0, 420.0)
         .resizable(true)
         .build()
