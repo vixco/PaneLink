@@ -145,6 +145,16 @@
     </main>
     <script>
       function readConfig() {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get("window") === "display") {
+          return {
+            peerId: params.get("peerId") || "unknown",
+            peerAddress: params.get("peerAddress") || "",
+            screenCount: Number(params.get("screens") || 1),
+            quality: params.get("quality") || "Low latency",
+          };
+        }
+
         try {
           return JSON.parse(localStorage.getItem("panelink.displayWindow") || "{}");
         } catch {
@@ -152,11 +162,29 @@
         }
       }
 
+      let activeFrameUrl = "";
+      let activeCount = 0;
+      const timers = new Map();
+
       function render() {
         const config = readConfig();
         const count = Math.max(1, Math.min(Number(config.screenCount || 1), 3));
         const frameUrl = config.peerAddress || "";
         const grid = document.getElementById("grid");
+
+        if (frameUrl === activeFrameUrl && count === activeCount) {
+          document.getElementById("peer").textContent = `${config.peerId || "unknown"} - ${config.quality || "Low latency"}`;
+          document.getElementById("frame-url").textContent = frameUrl || "Geen frame URL ontvangen.";
+          return;
+        }
+
+        activeFrameUrl = frameUrl;
+        activeCount = count;
+        for (const timer of timers.values()) {
+          clearTimeout(timer);
+        }
+        timers.clear();
+
         grid.className = `grid ${count === 1 ? "one" : count === 3 ? "three" : ""}`;
         grid.innerHTML = "";
 
@@ -165,12 +193,22 @@
           screen.className = "screen";
           const img = document.createElement("img");
           img.alt = `PaneLink screen ${index}`;
-          if (frameUrl) {
-            img.src = `${frameUrl}${frameUrl.includes("?") ? "&" : "?"}screen=${index}&t=${Date.now()}`;
-          }
+          const schedule = (delay) => {
+            if (!frameUrl) return;
+            clearTimeout(timers.get(index));
+            timers.set(index, setTimeout(() => {
+              img.src = `${frameUrl}${frameUrl.includes("?") ? "&" : "?"}screen=${index}&t=${Date.now()}`;
+            }, delay));
+          };
+          img.onload = () => {
+            document.getElementById("status-title").textContent = "Live frame ontvangen";
+            schedule(120);
+          };
           img.onerror = () => {
             document.getElementById("status-title").textContent = "Nog geen frame bereikbaar";
+            schedule(1000);
           };
+          schedule(0);
           screen.appendChild(img);
           const label = document.createElement("div");
           label.className = "label";

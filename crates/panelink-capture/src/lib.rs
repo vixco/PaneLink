@@ -1,9 +1,23 @@
 use serde::{Deserialize, Serialize};
-use std::{io::Cursor, sync::OnceLock, thread};
+use std::{
+    io::Cursor,
+    sync::{Arc, OnceLock, RwLock},
+    thread,
+    time::Duration,
+};
 use tiny_http::{Header, Response, Server, StatusCode};
 use xcap::{image::ImageFormat, Monitor};
 
 pub const FRAME_SERVER_PORT: u16 = 48171;
+
+#[derive(Debug, Default)]
+struct FrameCache {
+    frame: Option<Vec<u8>>,
+    error: Option<String>,
+    sequence: u64,
+}
+
+type SharedFrameCache = Arc<RwLock<FrameCache>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,15 +68,43 @@ pub fn start_frame_server() -> Result<u16, String> {
             let server = Server::http(("0.0.0.0", FRAME_SERVER_PORT)).map_err(|error| {
                 format!("Frame server could not bind port {FRAME_SERVER_PORT}: {error}")
             })?;
+            let cache = Arc::new(RwLock::new(FrameCache::default()));
+
+            start_capture_loop(Arc::clone(&cache))?;
 
             thread::Builder::new()
                 .name("panelink-frame-server".into())
-                .spawn(move || run_frame_server(server))
+                .spawn(move || run_frame_server(server, cache))
                 .map_err(|error| format!("Frame server could not start: {error}"))?;
 
             Ok(FRAME_SERVER_PORT)
         })
         .clone()
+}
+
+fn start_capture_loop(cache: SharedFrameCache) -> Result<(), String> {
+    thread::Builder::new()
+        .name("panelink-frame-capture".into())
+        .spawn(move || loop {
+            let delay = match capture_primary_png() {
+                Ok(frame) => {
+                    let mut state = cache.write().expect("frame cache should not be poisoned");
+                    state.frame = Some(frame);
+                    state.error = None;
+                    state.sequence = state.sequence.saturating_add(1);
+                    Duration::from_millis(180)
+                }
+                Err(error) => {
+                    let mut state = cache.write().expect("frame cache should not be poisoned");
+                    state.error = Some(error);
+                    Duration::from_millis(1000)
+                }
+            };
+
+            thread::sleep(delay);
+        })
+        .map(|_| ())
+        .map_err(|error| format!("Frame capture loop could not start: {error}"))
 }
 
 pub fn capture_primary_png() -> Result<Vec<u8>, String> {
@@ -83,7 +125,7 @@ pub fn capture_primary_png() -> Result<Vec<u8>, String> {
     Ok(bytes.into_inner())
 }
 
-fn run_frame_server(server: Server) {
+fn run_frame_server(server: Server, cache: SharedFrameCache) {
     for request in server.incoming_requests() {
         let method = request.method().as_str().to_string();
         let path = request.url().split('?').next().unwrap_or("/");
@@ -91,19 +133,44 @@ fn run_frame_server(server: Server) {
             empty_response(StatusCode(204))
         } else {
             match path {
-                "/frame" => match capture_primary_png() {
-                    Ok(frame) => binary_response(frame, "image/png", StatusCode(200)),
-                    Err(error) => text_response(error, StatusCode(503)),
-                },
-                "/health" => match capture_primary_png() {
-                    Ok(_) => text_response("ok", StatusCode(200)),
-                    Err(error) => text_response(error, StatusCode(503)),
-                },
+                "/frame" => cached_frame_response(&cache),
+                "/health" => cached_health_response(&cache),
                 _ => text_response("PaneLink frame server", StatusCode(200)),
             }
         };
 
         let _ = request.respond(response);
+    }
+}
+
+fn cached_frame_response(cache: &SharedFrameCache) -> Response<Cursor<Vec<u8>>> {
+    let state = cache.read().expect("frame cache should not be poisoned");
+
+    match &state.frame {
+        Some(frame) => binary_response(frame.clone(), "image/png", StatusCode(200)),
+        None => text_response(
+            state
+                .error
+                .clone()
+                .unwrap_or_else(|| "Waiting for first captured frame".into()),
+            StatusCode(503),
+        ),
+    }
+}
+
+fn cached_health_response(cache: &SharedFrameCache) -> Response<Cursor<Vec<u8>>> {
+    let state = cache.read().expect("frame cache should not be poisoned");
+
+    if state.frame.is_some() {
+        text_response(format!("ok frame={}", state.sequence), StatusCode(200))
+    } else {
+        text_response(
+            state
+                .error
+                .clone()
+                .unwrap_or_else(|| "Waiting for first captured frame".into()),
+            StatusCode(503),
+        )
     }
 }
 

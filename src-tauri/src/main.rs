@@ -84,19 +84,24 @@ fn stop_stream() -> panelink_transport::StreamState {
 fn open_display_window(
     app: AppHandle,
     screen_count: Option<u8>,
-    _peer_id: Option<String>,
-    _quality: Option<String>,
+    peer_id: Option<String>,
+    peer_address: Option<String>,
+    quality: Option<String>,
 ) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("display") {
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        return Ok(());
-    }
-
     let screen_count = screen_count.unwrap_or(1).clamp(1, 3);
     let initial_width = if screen_count > 1 { 1440.0 } else { 1280.0 };
+    let display_url = format!(
+        "index.html?window=display&peerId={}&peerAddress={}&screens={screen_count}&quality={}",
+        percent_encode(&peer_id.unwrap_or_else(|| "unknown".into())),
+        percent_encode(&peer_address.unwrap_or_default()),
+        percent_encode(&quality.unwrap_or_else(|| "Low latency".into()))
+    );
 
-    WebviewWindowBuilder::new(&app, "display", WebviewUrl::App("display.html".into()))
+    if let Some(window) = app.get_webview_window("display") {
+        let _ = window.close();
+    }
+
+    WebviewWindowBuilder::new(&app, "display", WebviewUrl::App(display_url.into()))
         .title("PaneLink Display")
         .inner_size(initial_width, 720.0)
         .min_inner_size(720.0, 420.0)
@@ -108,6 +113,20 @@ fn open_display_window(
         .map_err(|error| error.to_string())?;
 
     Ok(())
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+
+    encoded
 }
 
 #[tauri::command]
@@ -262,10 +281,13 @@ fn run_native_setup() -> NativeSetupState {
         NativeSetupState {
             started: true,
             platform: "windows".into(),
-            message: "Windows runtime setup checked. Receiver windows are disabled until native frame capture and transport are installed in the app.".into(),
+            message: format!(
+                "Windows capture is active. If the receiver stays black, allow PaneLink through Windows Firewall on port {}.",
+                panelink_capture::FRAME_SERVER_PORT
+            ),
             actions: vec![
-                "Verified packaged display window permissions".into(),
-                "Skipped opening receiver window because native frames are not available yet".into(),
+                "Started native frame capture cache".into(),
+                format!("Serving frames on port {}", panelink_capture::FRAME_SERVER_PORT),
             ],
             requires_restart: false,
         }

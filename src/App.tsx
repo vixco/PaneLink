@@ -11,7 +11,7 @@ import {
   Wifi,
   WifiOff,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   addRemoteScreen,
   closeDisplayWindow,
@@ -560,6 +560,8 @@ function ControlApp() {
 
 function DisplayWindow() {
   const [config, setConfig] = useState(readDisplayWindowConfig);
+  const [lastFrameAt, setLastFrameAt] = useState('');
+  const [frameError, setFrameError] = useState('');
   const screenCount = Math.max(1, Math.min(Number(config.screenCount || 1), 3));
   const screens = Array.from({ length: screenCount }, (_, index) => index + 1);
 
@@ -579,18 +581,84 @@ function DisplayWindow() {
       <section className={`display-window-grid screen-count-${screenCount}`}>
         {screens.map((screen) => (
           <div className="display-window-screen" key={screen}>
-            <span>Screen {screen}</span>
-            <small>Geen desktopframes</small>
+            <FrameImage
+              frameUrl={config.peerAddress}
+              onError={setFrameError}
+              onFrame={() => {
+                setFrameError('');
+                setLastFrameAt(new Date().toLocaleTimeString());
+              }}
+              screen={screen}
+            />
+            <div className="display-window-label">
+              <span>Screen {screen}</span>
+              <small>{config.peerAddress ? 'Live frame polling' : 'Geen frame URL'}</small>
+            </div>
           </div>
         ))}
       </section>
       <div className="display-window-status">
         <Monitor size={34} />
-        <strong>Nog geen beeld ontvangen</strong>
-      <span>{config.peerId} - {config.quality}</span>
-        <small>Frames: {config.peerAddress}</small>
+        <strong>{frameError ? 'Frame nog niet bereikbaar' : lastFrameAt ? `Live frame ${lastFrameAt}` : 'Wachten op eerste frame'}</strong>
+        <span>{config.peerId} - {config.quality}</span>
+        <small>{frameError || config.peerAddress || 'Geen frame URL ontvangen'}</small>
       </div>
     </main>
+  );
+}
+
+function FrameImage({
+  frameUrl,
+  onError,
+  onFrame,
+  screen,
+}: {
+  frameUrl: string;
+  onError: (message: string) => void;
+  onFrame: () => void;
+  screen: number;
+}) {
+  const [nonce, setNonce] = useState(Date.now());
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setNonce(Date.now());
+
+    return () => {
+      if (timerRef.current) {
+        window.clearTimeout(timerRef.current);
+      }
+    };
+  }, [frameUrl, screen]);
+
+  function scheduleNext(delay: number) {
+    if (timerRef.current) {
+      window.clearTimeout(timerRef.current);
+    }
+
+    timerRef.current = window.setTimeout(() => setNonce(Date.now()), delay);
+  }
+
+  if (!frameUrl) {
+    return <div className="display-window-placeholder" />;
+  }
+
+  const separator = frameUrl.includes('?') ? '&' : '?';
+
+  return (
+    <img
+      alt={`PaneLink screen ${screen}`}
+      className="display-window-frame"
+      onError={() => {
+        onError(`Geen frame van ${frameUrl}. Check firewall en of PaneLink op het andere apparaat open is.`);
+        scheduleNext(1000);
+      }}
+      onLoad={() => {
+        onFrame();
+        scheduleNext(120);
+      }}
+      src={`${frameUrl}${separator}screen=${screen}&t=${nonce}`}
+    />
   );
 }
 
@@ -675,7 +743,10 @@ function readDisplayWindowConfig(): DisplayWindowRequest {
 }
 
 function frameUrlForPeer(peer: Peer) {
-  const host = peer.address.split(':')[0] || peer.address;
+  const address = peer.address.trim();
+  const host = address.startsWith('[')
+    ? address.slice(1, address.indexOf(']'))
+    : address.split(':')[0] || address;
 
   return `http://${host}:48171/frame`;
 }
