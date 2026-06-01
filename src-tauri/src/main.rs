@@ -1,8 +1,14 @@
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use panelink_core::{
     AudioCapabilities, AudioDevice, Capabilities, CaptureState, DisplayCapabilities,
     PermissionState, PermissionStatus, RoutingState, SessionSnapshot, VirtualDisplayState,
 };
 use serde::Serialize;
+use std::{
+    io::{Read, Write},
+    net::{SocketAddr, TcpStream, ToSocketAddrs},
+    time::Duration,
+};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 #[derive(Debug, Serialize)]
@@ -13,6 +19,16 @@ struct NativeSetupState {
     message: String,
     actions: Vec<String>,
     requires_restart: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteFrameResponse {
+    ok: bool,
+    status_code: u16,
+    content_type: String,
+    data_url: Option<String>,
+    message: String,
 }
 
 #[tauri::command]
@@ -59,6 +75,20 @@ fn get_frame_server_url() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn fetch_remote_frame(url: String) -> RemoteFrameResponse {
+    match fetch_http_bytes(&url, Duration::from_millis(1200)) {
+        Ok(response) => response,
+        Err(error) => RemoteFrameResponse {
+            ok: false,
+            status_code: 0,
+            content_type: String::new(),
+            data_url: None,
+            message: error,
+        },
+    }
+}
+
+#[tauri::command]
 fn connect_peer(peer_id: String) -> Result<SessionSnapshot, panelink_transport::SessionError> {
     panelink_transport::connect_peer(peer_id)
 }
@@ -91,7 +121,7 @@ fn open_display_window(
     let screen_count = screen_count.unwrap_or(1).clamp(1, 3);
     let initial_width = if screen_count > 1 { 1440.0 } else { 1280.0 };
     let display_url = format!(
-        "index.html?window=display&peerId={}&peerAddress={}&screens={screen_count}&quality={}",
+        "/?window=display&peerId={}&peerAddress={}&screens={screen_count}&quality={}",
         percent_encode(&peer_id.unwrap_or_else(|| "unknown".into())),
         percent_encode(&peer_address.unwrap_or_default()),
         percent_encode(&quality.unwrap_or_else(|| "Low latency".into()))
@@ -127,6 +157,170 @@ fn percent_encode(value: &str) -> String {
     }
 
     encoded
+}
+
+#[derive(Debug)]
+struct HttpTarget {
+    authority: String,
+    host: String,
+    port: u16,
+    path: String,
+}
+
+fn fetch_http_bytes(url: &str, timeout: Duration) -> Result<RemoteFrameResponse, String> {
+    let target = parse_http_url(url)?;
+    let mut stream = connect_to_target(&target, timeout)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| format!("Could not set read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| format!("Could not set write timeout: {error}"))?;
+
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept: image/png,*/*\r\nCache-Control: no-cache\r\n\r\n",
+        target.path, target.authority
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("Could not request remote frame: {error}"))?;
+
+    let mut bytes = Vec::new();
+    stream
+        .take(12 * 1024 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read remote frame: {error}"))?;
+
+    parse_http_response(url, &bytes)
+}
+
+fn parse_http_url(url: &str) -> Result<HttpTarget, String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("PaneLink only supports http frame URLs for now: {url}"))?;
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (rest, "/".into()),
+    };
+
+    if authority.is_empty() {
+        return Err("Frame URL is missing a host".into());
+    }
+
+    let (host, port) = if authority.starts_with('[') {
+        let end = authority
+            .find(']')
+            .ok_or_else(|| format!("Invalid IPv6 frame URL host: {authority}"))?;
+        let host = authority[1..end].to_string();
+        let port = authority[end + 1..]
+            .strip_prefix(':')
+            .map(|value| value.parse::<u16>())
+            .transpose()
+            .map_err(|error| format!("Invalid frame URL port: {error}"))?
+            .unwrap_or(80);
+        (host, port)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) if port.chars().all(|char| char.is_ascii_digit()) => (
+                host.to_string(),
+                port.parse::<u16>()
+                    .map_err(|error| format!("Invalid frame URL port: {error}"))?,
+            ),
+            _ => (authority.to_string(), 80),
+        }
+    };
+
+    if host.is_empty() {
+        return Err("Frame URL is missing a host".into());
+    }
+
+    Ok(HttpTarget {
+        authority: authority.into(),
+        host,
+        port,
+        path,
+    })
+}
+
+fn connect_to_target(target: &HttpTarget, timeout: Duration) -> Result<TcpStream, String> {
+    let addresses: Vec<SocketAddr> = (target.host.as_str(), target.port)
+        .to_socket_addrs()
+        .map_err(|error| format!("Could not resolve {}:{}: {error}", target.host, target.port))?
+        .collect();
+
+    if addresses.is_empty() {
+        return Err(format!(
+            "No address found for {}:{}",
+            target.host, target.port
+        ));
+    }
+
+    let mut last_error = None;
+    for address in addresses {
+        match TcpStream::connect_timeout(&address, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(format!(
+        "Could not connect to {}:{} ({})",
+        target.host,
+        target.port,
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "unknown error".into())
+    ))
+}
+
+fn parse_http_response(url: &str, bytes: &[u8]) -> Result<RemoteFrameResponse, String> {
+    let header_end = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "Remote frame response did not include HTTP headers".to_string())?;
+    let header_text = String::from_utf8_lossy(&bytes[..header_end]);
+    let body = &bytes[header_end + 4..];
+    let mut lines = header_text.lines();
+    let status_line = lines.next().unwrap_or_default();
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(0);
+    let content_type = lines
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-type")
+                .then(|| value.trim().to_string())
+        })
+        .unwrap_or_default();
+
+    if status_code == 200 && body.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Ok(RemoteFrameResponse {
+            ok: true,
+            status_code,
+            content_type: "image/png".into(),
+            data_url: Some(format!(
+                "data:image/png;base64,{}",
+                BASE64_STANDARD.encode(body)
+            )),
+            message: format!("Frame loaded from {url}"),
+        });
+    }
+
+    let message = if body.is_empty() {
+        format!("Remote frame returned HTTP {status_code}")
+    } else {
+        String::from_utf8_lossy(body).trim().to_string()
+    };
+
+    Ok(RemoteFrameResponse {
+        ok: false,
+        status_code,
+        content_type,
+        data_url: None,
+        message,
+    })
 }
 
 #[tauri::command]
@@ -323,6 +517,7 @@ fn main() {
             advertise_peer,
             issue_pairing_token,
             get_frame_server_url,
+            fetch_remote_frame,
             get_session_snapshot,
             get_transport_state,
             get_stream_state,

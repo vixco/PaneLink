@@ -1,6 +1,6 @@
 [package]
 name = "panelink"
-version = "0.1.14"
+version = "0.1.15"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -9,6 +9,7 @@ repository.workspace = true
 tauri-build.workspace = true
 
 [dependencies]
+base64.workspace = true
 panelink-audio.workspace = true
 panelink-capture.workspace = true
 panelink-core.workspace = true

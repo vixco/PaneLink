@@ -102,6 +102,14 @@ export type DisplayWindowState = {
   message: string;
 };
 
+export type RemoteFrameResponse = {
+  ok: boolean;
+  statusCode: number;
+  contentType: string;
+  dataUrl: string | null;
+  message: string;
+};
+
 export type NativeSetupState = {
   started: boolean;
   platform: string;

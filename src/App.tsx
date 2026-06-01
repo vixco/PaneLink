@@ -11,12 +11,13 @@ import {
   Wifi,
   WifiOff,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   addRemoteScreen,
   closeDisplayWindow,
   connectPeer,
   disconnectPeer,
+  fetchRemoteFrame,
   getCapabilities,
   getPermissions,
   getSession,
@@ -560,6 +561,7 @@ function ControlApp() {
 
 function DisplayWindow() {
   const [config, setConfig] = useState(readDisplayWindowConfig);
+  const [frameSrc, setFrameSrc] = useState('');
   const [lastFrameAt, setLastFrameAt] = useState('');
   const [frameError, setFrameError] = useState('');
   const screenCount = Math.max(1, Math.min(Number(config.screenCount || 1), 3));
@@ -576,23 +578,54 @@ function DisplayWindow() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | null = null;
+
+    async function loadFrame() {
+      if (!config.peerAddress) {
+        setFrameSrc('');
+        setFrameError('Geen frame URL ontvangen');
+        return;
+      }
+
+      const frame = await fetchRemoteFrame(config.peerAddress);
+      if (cancelled) return;
+
+      if (frame.ok && frame.dataUrl) {
+        setFrameSrc(frame.dataUrl);
+        setFrameError('');
+        setLastFrameAt(new Date().toLocaleTimeString());
+        timer = window.setTimeout(loadFrame, 120);
+      } else {
+        setFrameError(frame.message || `HTTP ${frame.statusCode}`);
+        timer = window.setTimeout(loadFrame, 1000);
+      }
+    }
+
+    void loadFrame();
+
+    return () => {
+      cancelled = true;
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [config.peerAddress]);
+
   return (
     <main className="display-window-shell">
       <section className={`display-window-grid screen-count-${screenCount}`}>
         {screens.map((screen) => (
           <div className="display-window-screen" key={screen}>
-            <FrameImage
-              frameUrl={config.peerAddress}
-              onError={setFrameError}
-              onFrame={() => {
-                setFrameError('');
-                setLastFrameAt(new Date().toLocaleTimeString());
-              }}
-              screen={screen}
-            />
+            {frameSrc ? (
+              <img alt={`PaneLink screen ${screen}`} className="display-window-frame" src={frameSrc} />
+            ) : (
+              <div className="display-window-placeholder" />
+            )}
             <div className="display-window-label">
               <span>Screen {screen}</span>
-              <small>{config.peerAddress ? 'Live frame polling' : 'Geen frame URL'}</small>
+              <small>{frameSrc ? 'Live via native fetch' : config.peerAddress ? 'Frame fetch actief' : 'Geen frame URL'}</small>
             </div>
           </div>
         ))}
@@ -604,61 +637,6 @@ function DisplayWindow() {
         <small>{frameError || config.peerAddress || 'Geen frame URL ontvangen'}</small>
       </div>
     </main>
-  );
-}
-
-function FrameImage({
-  frameUrl,
-  onError,
-  onFrame,
-  screen,
-}: {
-  frameUrl: string;
-  onError: (message: string) => void;
-  onFrame: () => void;
-  screen: number;
-}) {
-  const [nonce, setNonce] = useState(Date.now());
-  const timerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    setNonce(Date.now());
-
-    return () => {
-      if (timerRef.current) {
-        window.clearTimeout(timerRef.current);
-      }
-    };
-  }, [frameUrl, screen]);
-
-  function scheduleNext(delay: number) {
-    if (timerRef.current) {
-      window.clearTimeout(timerRef.current);
-    }
-
-    timerRef.current = window.setTimeout(() => setNonce(Date.now()), delay);
-  }
-
-  if (!frameUrl) {
-    return <div className="display-window-placeholder" />;
-  }
-
-  const separator = frameUrl.includes('?') ? '&' : '?';
-
-  return (
-    <img
-      alt={`PaneLink screen ${screen}`}
-      className="display-window-frame"
-      onError={() => {
-        onError(`Geen frame van ${frameUrl}. Check firewall en of PaneLink op het andere apparaat open is.`);
-        scheduleNext(1000);
-      }}
-      onLoad={() => {
-        onFrame();
-        scheduleNext(120);
-      }}
-      src={`${frameUrl}${separator}screen=${screen}&t=${nonce}`}
-    />
   );
 }
 

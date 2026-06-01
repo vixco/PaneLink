@@ -15,6 +15,7 @@ import type {
   NativeSetupState,
   Peer,
   PermissionState,
+  RemoteFrameResponse,
   RemoteScreen,
   SessionSnapshot,
   StartStreamRequest,
@@ -238,6 +239,59 @@ export function runNativeSetup() {
 
 export function getFrameServerUrl() {
   return call<string>('get_frame_server_url', 'http://127.0.0.1:48171/frame');
+}
+
+export async function fetchRemoteFrame(url: string) {
+  if (!isTauri) {
+    try {
+      const response = await fetch(url, { cache: 'no-store' });
+      if (!response.ok) {
+        return {
+          ok: false,
+          statusCode: response.status,
+          contentType: response.headers.get('content-type') ?? '',
+          dataUrl: null,
+          message: await response.text(),
+        } satisfies RemoteFrameResponse;
+      }
+
+      const blob = await response.blob();
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+      });
+
+      return {
+        ok: true,
+        statusCode: response.status,
+        contentType: blob.type || response.headers.get('content-type') || 'image/png',
+        dataUrl,
+        message: `Frame loaded from ${url}`,
+      } satisfies RemoteFrameResponse;
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 0,
+        contentType: '',
+        dataUrl: null,
+        message: error instanceof Error ? error.message : String(error),
+      } satisfies RemoteFrameResponse;
+    }
+  }
+
+  return call<RemoteFrameResponse>(
+    'fetch_remote_frame',
+    {
+      ok: false,
+      statusCode: 0,
+      contentType: '',
+      dataUrl: null,
+      message: 'Remote frame command failed',
+    },
+    { url },
+  );
 }
 
 export function addRemoteScreen(peerId: string) {
