@@ -168,6 +168,11 @@ p {
   padding: 0 13px;
 }
 
+.update-action {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.56;

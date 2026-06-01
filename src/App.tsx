@@ -54,11 +54,12 @@ function App() {
   const [quality, setQuality] = useState<StreamState['quality']>('Low latency');
   const [isBusy, setIsBusy] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ state: 'idle', label: 'Updates ready' });
 
   useEffect(() => {
     void loadEverything(true);
-    void checkAndInstallUpdate(setUpdateStatus);
+    void handleCheckForUpdate();
   }, []);
 
   useEffect(() => {
@@ -163,6 +164,15 @@ function App() {
       setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
     } finally {
       setIsBusy(false);
+    }
+  }
+
+  async function handleCheckForUpdate() {
+    setIsCheckingUpdate(true);
+    try {
+      await checkAndInstallUpdate(setUpdateStatus);
+    } finally {
+      setIsCheckingUpdate(false);
     }
   }
 
@@ -321,6 +331,10 @@ function App() {
             <Settings size={18} />
             <h2>Status</h2>
           </div>
+          <button className="secondary-action update-action" disabled={isCheckingUpdate} onClick={handleCheckForUpdate}>
+            {isCheckingUpdate ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+            Check for update
+          </button>
           <small className="muted">Update: {updateStatus.label}</small>
           <small className="muted">Peer ID: {data.capabilities?.peerId ?? 'laden...'}</small>
           {data.permissions.slice(0, 2).map((permission) => (
