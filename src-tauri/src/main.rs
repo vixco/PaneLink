@@ -1,7 +1,6 @@
 use panelink_core::{
-    demo_session, AudioCapabilities, AudioDevice, Capabilities, CaptureState, ConnectionStatus,
-    DisplayCapabilities, PermissionState, PermissionStatus, RoutingState, SessionSnapshot,
-    VirtualDisplayState,
+    AudioCapabilities, AudioDevice, Capabilities, CaptureState, DisplayCapabilities,
+    PermissionState, PermissionStatus, RoutingState, SessionSnapshot, VirtualDisplayState,
 };
 
 #[tauri::command]
@@ -10,23 +9,61 @@ fn list_peers() -> Vec<panelink_core::Peer> {
 }
 
 #[tauri::command]
-fn get_session_snapshot() -> SessionSnapshot {
-    demo_session(ConnectionStatus::Ready, Some("windows-desk".into()))
+fn advertise_peer() -> panelink_discovery::AdvertisementPayload {
+    panelink_discovery::advertise_payload()
 }
 
 #[tauri::command]
-fn connect_peer(peer_id: String) -> SessionSnapshot {
-    demo_session(ConnectionStatus::Connected, Some(peer_id))
+fn issue_pairing_token(peer_id: String) -> Result<panelink_discovery::PairingToken, String> {
+    panelink_discovery::issue_pairing_token(&peer_id)
+        .ok_or_else(|| format!("peer '{peer_id}' is not in the discovery cache"))
+}
+
+#[tauri::command]
+fn get_session_snapshot() -> SessionSnapshot {
+    panelink_transport::get_session_snapshot()
+}
+
+#[tauri::command]
+fn get_transport_state() -> panelink_transport::SessionState {
+    panelink_transport::session_state()
+}
+
+#[tauri::command]
+fn connect_peer(peer_id: String) -> Result<SessionSnapshot, panelink_transport::SessionError> {
+    panelink_transport::connect_peer(peer_id)
 }
 
 #[tauri::command]
 fn disconnect_peer() -> SessionSnapshot {
-    demo_session(ConnectionStatus::Ready, None)
+    panelink_transport::disconnect_peer()
+}
+
+#[tauri::command]
+fn ping_peer(
+    peer_id: String,
+) -> Result<panelink_transport::PingSample, panelink_transport::SessionError> {
+    panelink_transport::ping_peer(peer_id)
 }
 
 #[tauri::command]
 fn list_audio_devices() -> Vec<AudioDevice> {
     panelink_audio::list_devices()
+}
+
+#[tauri::command]
+fn get_audio_route_catalog() -> panelink_audio::AudioRouteCatalog {
+    panelink_audio::get_route_catalog()
+}
+
+#[tauri::command]
+fn get_input_backend_report() -> panelink_input::InputBackendReport {
+    panelink_input::backend_report()
+}
+
+#[tauri::command]
+fn submit_input_batch(batch: panelink_input::InputEventBatch) -> panelink_input::InputBatchReceipt {
+    panelink_input::accept_batch(batch)
 }
 
 #[tauri::command]
@@ -97,12 +134,21 @@ fn get_permissions() -> Vec<PermissionState> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             list_peers,
+            advertise_peer,
+            issue_pairing_token,
             get_session_snapshot,
+            get_transport_state,
             connect_peer,
             disconnect_peer,
+            ping_peer,
             list_audio_devices,
+            get_audio_route_catalog,
+            get_input_backend_report,
+            submit_input_batch,
             get_capabilities,
             get_permissions
         ])

@@ -11,12 +11,14 @@ import {
   Headphones,
   Keyboard,
   Monitor,
-  Plus,
   MousePointer2,
+  Plus,
   Radio,
+  RotateCcw,
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  Trash2,
   Volume2,
   Wifi,
 } from 'lucide-react';
@@ -30,7 +32,8 @@ import {
   listAudioDevices,
   listPeers,
 } from './tauri';
-import type { AudioDevice, Capabilities, Peer, PermissionState, SessionSnapshot } from './types';
+import type { AudioDevice, Capabilities, Peer, PermissionState, RemoteScreen, SessionSnapshot } from './types';
+import { checkAndInstallUpdate, type UpdateStatus } from './updater';
 
 type AppData = {
   peers: Peer[];
@@ -58,7 +61,8 @@ function App() {
   });
   const [selectedPeerId, setSelectedPeerId] = useState('windows-desk');
   const [quality, setQuality] = useState('Low latency');
-  const [screenCount, setScreenCount] = useState(1);
+  const [screens, setScreens] = useState<RemoteScreen[]>([]);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ state: 'idle', label: 'Updates ready' });
   const [isBusy, setIsBusy] = useState(false);
 
   useEffect(() => {
@@ -66,8 +70,13 @@ function App() {
       ([peers, session, capabilities, audioDevices, permissions]) => {
         setData({ peers, session, capabilities, audioDevices, permissions });
         setSelectedPeerId(session.activePeerId ?? peers[0]?.id ?? '');
+        setScreens(session.screens);
       },
     );
+  }, []);
+
+  useEffect(() => {
+    void checkAndInstallUpdate(setUpdateStatus);
   }, []);
 
   const selectedPeer = useMemo(
@@ -82,11 +91,39 @@ function App() {
     setIsBusy(true);
     const next = isConnected ? await disconnectPeer() : await connectPeer(selectedPeer.id);
     setData((current) => ({ ...current, session: next }));
+    setScreens((current) =>
+      current.map((screen) => ({
+        ...screen,
+        status: next.status === 'connected' ? 'connected' : 'rollback-pending',
+      })),
+    );
     setIsBusy(false);
   }
 
   function addScreen() {
-    setScreenCount((count) => Math.min(count + 1, 3));
+    setScreens((current) => {
+      if (current.length >= 3) return current;
+      const index = current.length;
+
+      return [
+        ...current,
+        {
+          id: `screen-${index + 1}`,
+          name: `Remote screen ${index + 1}`,
+          role: 'extended',
+          sourceDisplay: `Virtual Display ${index + 1}`,
+          targetDisplay: `Windows Display ${index + 1}`,
+          nativeResolution: index === 1 ? '1920 x 1080 @ 144 Hz' : '1440 x 900 @ 60 Hz',
+          fittedResolution: index === 1 ? '1920 x 1080 @ 120 Hz' : '1440 x 900 @ 60 Hz',
+          scaleMode: 'auto-fit',
+          status: isConnected ? 'connected' : 'ready',
+        },
+      ];
+    });
+  }
+
+  function removeScreen(id: string) {
+    setScreens((current) => (current.length === 1 ? current : current.filter((screen) => screen.id !== id)));
   }
 
   return (
@@ -107,6 +144,10 @@ function App() {
             </button>
           ))}
         </nav>
+        <div className={`update-card ${updateStatus.state}`}>
+          <strong>{updateStatus.label}</strong>
+          <span>Automatic releases via GitHub.</span>
+        </div>
         <div className="sidebar-card">
           <ShieldCheck size={18} />
           <div>
@@ -151,7 +192,7 @@ function App() {
                   <span>
                     <strong>{peer.name}</strong>
                     <small>
-                      {peer.os} · {peer.address}
+                      {peer.os} - {peer.address}
                     </small>
                   </span>
                   <em>{peer.latencyMs} ms</em>
@@ -163,7 +204,7 @@ function App() {
             </button>
             <div className="pairing-strip">
               <BadgeCheck size={16} />
-              Pairing ready · mDNS discovery · QUIC LAN path
+              Pairing ready - mDNS discovery - QUIC LAN path
             </div>
           </section>
 
@@ -185,12 +226,34 @@ function App() {
             <div className="screen-toolbar">
               <div>
                 <span className="section-label">Screens</span>
-                <h2>{screenCount} remote display{screenCount > 1 ? 's' : ''}</h2>
+                <h2>
+                  {screens.length} remote display{screens.length > 1 ? 's' : ''}
+                </h2>
               </div>
-              <button className="secondary-action" disabled={screenCount >= 3} onClick={addScreen}>
+              <button className="secondary-action" disabled={screens.length >= 3} onClick={addScreen}>
                 <Plus size={15} />
                 Add screen
               </button>
+            </div>
+
+            <div className="screen-slots">
+              {screens.map((screen, index) => (
+                <div className="screen-slot" key={screen.id}>
+                  <span>{index + 1}</span>
+                  <strong>{screen.targetDisplay}</strong>
+                  <small>
+                    {screen.fittedResolution} - {screen.scaleMode}
+                  </small>
+                  <em className={screen.status}>{screen.status}</em>
+                  <button
+                    aria-label={`Remove ${screen.targetDisplay}`}
+                    disabled={screens.length === 1}
+                    onClick={() => removeScreen(screen.id)}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              ))}
             </div>
 
             <div className="display-preview">
@@ -202,11 +265,11 @@ function App() {
                 </div>
               </div>
               <div className="preview-frame">
-                <div className={`screen-grid screen-count-${screenCount}`}>
-                  {Array.from({ length: screenCount }).map((_, index) => (
-                    <div key={index}>
+                <div className={`screen-grid screen-count-${screens.length}`}>
+                  {screens.map((screen, index) => (
+                    <div key={screen.id}>
                       <span>Screen {index + 1}</span>
-                      <small>{index === 0 ? '2560 x 1440' : index === 1 ? '1920 x 1080 fit' : '1440 x 900 fit'}</small>
+                      <small>{screen.fittedResolution.replace(' @ ', ' fit ')}</small>
                     </div>
                   ))}
                 </div>
@@ -214,10 +277,14 @@ function App() {
                   <Monitor size={28} />
                   <strong>{isConnected ? 'Live display stream active' : 'Ready to start direct display session'}</strong>
                   <span>
-                    {session?.resolution ?? 'No resolution negotiated yet'} · auto-fit and rollback enabled
+                    {session?.resolution ?? 'No resolution negotiated yet'} - auto-fit and rollback enabled
                   </span>
                 </div>
               </div>
+            </div>
+            <div className="rollback-strip">
+              <RotateCcw size={15} />
+              Previous display layout is saved before connect and restored automatically on disconnect.
             </div>
           </section>
 
@@ -345,7 +412,7 @@ function PermissionsPanel({ permissions, capabilities }: { permissions: Permissi
         ))}
       </div>
       <p className="capability-note">
-        Virtual display: {capabilities?.display.virtualDisplay ?? 'checking'} · audio routing:{' '}
+        Virtual display: {capabilities?.display.virtualDisplay ?? 'checking'} - audio routing:{' '}
         {capabilities?.audio.virtualRouting ?? 'checking'}
       </p>
     </section>

@@ -73,6 +73,8 @@ export const fallbackSession: SessionSnapshot = {
   activePeerId: 'windows-desk',
   display: 'Desk monitor',
   resolution: '2560 x 1440 @ 120 Hz',
+  displayPlan: null,
+  rollbackSnapshot: null,
   screens: [
     {
       id: 'screen-main',

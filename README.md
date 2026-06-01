@@ -73,6 +73,10 @@ cargo test --workspace
 
 See [docs/roadmap.md](docs/roadmap.md).
 
+## Releases and updates
+
+PaneLink builds Windows and macOS downloads through GitHub Actions. Installed apps check GitHub Releases for signed updates. See [docs/release.md](docs/release.md).
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

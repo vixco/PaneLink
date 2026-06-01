@@ -48,6 +48,8 @@ export type SessionSnapshot = {
   activePeerId: string | null;
   display: string;
   resolution: string;
+  displayPlan: DisplaySessionPlan | null;
+  rollbackSnapshot: RollbackSnapshot | null;
   screens: RemoteScreen[];
   fps: number;
   latencyMs: number;
@@ -69,4 +71,92 @@ export type RemoteScreen = {
   fittedResolution: string;
   scaleMode: 'auto-fit' | 'native' | 'manual';
   status: 'ready' | 'connected' | 'rollback-pending';
+};
+
+export type DisplaySessionPlan = {
+  id: string;
+  peerId: string;
+  windowsPc: DisplayTopology;
+  screens: PlannedScreen[];
+  rollbackSnapshot: RollbackSnapshot;
+};
+
+export type DisplayTopology = {
+  pcId: string;
+  pcName: string;
+  displays: TargetDisplay[];
+};
+
+export type SourceDisplay = {
+  id: string;
+  name: string;
+  nativeMode: DisplayMode;
+  currentMode: DisplayMode;
+};
+
+export type TargetDisplay = {
+  id: string;
+  name: string;
+  role: 'primary' | 'extended';
+  nativeMode: DisplayMode;
+  currentMode: DisplayMode;
+  supportedModes: DisplayMode[];
+  bounds: DisplayRect;
+  attached: boolean;
+};
+
+export type DisplayMode = {
+  width: number;
+  height: number;
+  refreshHz: number;
+};
+
+export type DisplayRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type PlannedScreen = {
+  sourceDisplay: SourceDisplay;
+  targetDisplay: TargetDisplay;
+  selectedMode: DisplayMode;
+  fittedResolution: FittedResolution;
+  remoteScreen: RemoteScreen;
+};
+
+export type FittedResolution = {
+  width: number;
+  height: number;
+  refreshHz: number;
+  insets: ScaleInsets;
+};
+
+export type ScaleInsets = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+};
+
+export type RollbackSnapshot = {
+  id: string;
+  peerId: string;
+  reason: 'disconnect' | 'crash-recovery' | 'user-cancel';
+  localLayout: DisplayLayout;
+  remoteLayout: DisplayLayout;
+};
+
+export type DisplayLayout = {
+  pcId: string;
+  displays: DisplayLayoutEntry[];
+};
+
+export type DisplayLayoutEntry = {
+  displayId: string;
+  mode: DisplayMode;
+  bounds: DisplayRect;
+  primary: boolean;
+  attached: boolean;
 };

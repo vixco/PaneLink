@@ -25,7 +25,25 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
-    "icon": []
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJBQUE0QkQ2MTU1NDQxQkEKUldTNlFWUVYxa3VxdW9WaEtUY1B0Q2pTN1dHdnh4OWhVeU9PZG42UVd4RSt0NTFVZTFRQ0dta1cK",
+      "endpoints": [
+        "https://github.com/vixco/PaneLink/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

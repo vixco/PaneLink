@@ -32,6 +32,8 @@ Virtual display support is separate from screen capture. A true "Mac sees Window
 
 PaneLink models each connected monitor as a remote screen slot. A Windows PC with three monitors can expose three target displays. The Mac can then add one or more screen slots and map them to those targets.
 
+The planner layer lives in `panelink-core::display_plan` and is intentionally platform-free. Platform crates are expected to enumerate Windows displays and current layouts later; the planner only consumes typed topologies, source display modes and target display modes.
+
 The intended connection flow:
 
 1. Receiver advertises all physical displays with native resolution, refresh rate, safe scaling range and current layout.

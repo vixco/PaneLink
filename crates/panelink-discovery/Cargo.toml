@@ -7,3 +7,5 @@ repository.workspace = true
 
 [dependencies]
 panelink-core.workspace = true
+serde.workspace = true
+uuid.workspace = true

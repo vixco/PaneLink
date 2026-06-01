@@ -1,7 +1,17 @@
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+pub mod display_plan;
+
+pub use display_plan::{
+    auto_fit_mode, fit_resolution, layout_from_topology, plan_add_screen, DisplayLayout,
+    DisplayLayoutEntry, DisplayMode, DisplayPlanError, DisplayRect, DisplaySessionPlan,
+    DisplayTopology, FittedResolution, PlannedScreen, RollbackReason, RollbackSnapshot,
+    ScaleInsets, SourceDisplay, TargetDisplay, TargetDisplayRole,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Peer {
     pub id: String,
@@ -14,14 +24,14 @@ pub struct Peer {
     pub latency_ms: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperatingSystem {
     #[serde(rename = "macOS")]
     MacOs,
     Windows,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PeerStatus {
     Online,
@@ -115,13 +125,15 @@ pub enum PermissionStatus {
     Unsupported,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSnapshot {
     pub status: ConnectionStatus,
     pub active_peer_id: Option<String>,
     pub display: String,
     pub resolution: String,
+    pub display_plan: Option<DisplaySessionPlan>,
+    pub rollback_snapshot: Option<RollbackSnapshot>,
     pub screens: Vec<RemoteScreen>,
     pub fps: u16,
     pub latency_ms: u16,
@@ -133,7 +145,7 @@ pub struct SessionSnapshot {
     pub mic_input: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteScreen {
     pub id: String,
@@ -147,14 +159,14 @@ pub struct RemoteScreen {
     pub status: ScreenStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScreenRole {
     Primary,
     Extended,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ScaleMode {
     AutoFit,
@@ -162,7 +174,7 @@ pub enum ScaleMode {
     Manual,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ScreenStatus {
     Ready,
@@ -170,7 +182,7 @@ pub enum ScreenStatus {
     RollbackPending,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ConnectionStatus {
     Ready,
@@ -180,7 +192,7 @@ pub enum ConnectionStatus {
     Offline,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransportMode {
     #[serde(rename = "LAN QUIC")]
     LanQuic,
@@ -191,7 +203,11 @@ pub enum TransportMode {
 }
 
 pub fn local_peer_id() -> String {
-    Uuid::new_v4().to_string()
+    static LOCAL_PEER_ID: OnceLock<String> = OnceLock::new();
+
+    LOCAL_PEER_ID
+        .get_or_init(|| Uuid::new_v4().to_string())
+        .clone()
 }
 
 pub fn demo_peers() -> Vec<Peer> {
@@ -220,22 +236,93 @@ pub fn demo_peers() -> Vec<Peer> {
 }
 
 pub fn demo_session(status: ConnectionStatus, active_peer_id: Option<String>) -> SessionSnapshot {
+    let source_display = SourceDisplay {
+        id: "macbook-built-in".into(),
+        name: "MacBook display".into(),
+        native_mode: DisplayMode {
+            width: 2560,
+            height: 1600,
+            refresh_hz: 120,
+        },
+        current_mode: DisplayMode {
+            width: 2560,
+            height: 1600,
+            refresh_hz: 120,
+        },
+    };
+    let target_display = TargetDisplay {
+        id: "windows-display-1".into(),
+        name: "Windows Display 1".into(),
+        role: TargetDisplayRole::Primary,
+        native_mode: DisplayMode {
+            width: 2560,
+            height: 1440,
+            refresh_hz: 120,
+        },
+        current_mode: DisplayMode {
+            width: 2560,
+            height: 1440,
+            refresh_hz: 120,
+        },
+        supported_modes: vec![
+            DisplayMode {
+                width: 2560,
+                height: 1440,
+                refresh_hz: 120,
+            },
+            DisplayMode {
+                width: 1920,
+                height: 1200,
+                refresh_hz: 60,
+            },
+            DisplayMode {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 120,
+            },
+        ],
+        bounds: DisplayRect {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        },
+        attached: true,
+    };
+    let windows_pc = DisplayTopology {
+        pc_id: "windows-desk".into(),
+        pc_name: "Windows Desk".into(),
+        displays: vec![target_display],
+    };
+    let display_plan = plan_add_screen(
+        "demo-plan",
+        active_peer_id.as_deref().unwrap_or("windows-desk"),
+        windows_pc,
+        source_display,
+        "windows-display-1",
+    )
+    .ok();
+    let rollback_snapshot = display_plan
+        .as_ref()
+        .map(|plan| plan.rollback_snapshot.clone());
+    let screens = display_plan
+        .as_ref()
+        .map(|plan| {
+            plan.screens
+                .iter()
+                .map(|screen| screen.remote_screen.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+
     SessionSnapshot {
         status,
         active_peer_id,
         display: "Desk monitor".into(),
         resolution: "2560 x 1440 @ 120 Hz".into(),
-        screens: vec![RemoteScreen {
-            id: "screen-main".into(),
-            name: "Desk monitor".into(),
-            role: ScreenRole::Primary,
-            source_display: "MacBook display".into(),
-            target_display: "Windows Display 1".into(),
-            native_resolution: "2560 x 1440 @ 120 Hz".into(),
-            fitted_resolution: "2560 x 1440 @ 120 Hz".into(),
-            scale_mode: ScaleMode::AutoFit,
-            status: ScreenStatus::Ready,
-        }],
+        display_plan,
+        rollback_snapshot,
+        screens,
         fps: 120,
         latency_ms: 9,
         bitrate_mbps: 58.0,

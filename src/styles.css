@@ -65,6 +65,38 @@ nav { display: grid; gap: 6px; }
   text-align: left;
 }
 .nav-item.active, .nav-item:hover { color: #fff; background: #1d2834; }
+.update-card {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 11px 12px;
+  background: rgba(23, 105, 224, 0.1);
+}
+
+.update-card strong,
+.update-card span {
+  display: block;
+}
+
+.update-card strong {
+  color: #fff;
+  font-size: 13px;
+}
+
+.update-card span {
+  color: #9aa8b7;
+  font-size: 12px;
+  margin-top: 3px;
+}
+
+.update-card.installing,
+.update-card.available {
+  border-color: rgba(26, 155, 104, 0.45);
+}
+
+.update-card.error {
+  border-color: rgba(183, 109, 17, 0.45);
+}
+
 .sidebar-card {
   margin-top: auto;
   border: 1px solid rgba(255, 255, 255, 0.1);
