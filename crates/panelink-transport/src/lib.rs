@@ -203,6 +203,7 @@ pub enum SessionError {
     ScreenLimitReached,
     ScreenNotFound,
     CannotRemoveLastScreen,
+    StreamUnavailable,
 }
 
 #[derive(Debug, Default)]
@@ -266,76 +267,25 @@ impl SessionManager {
 
     pub fn start_stream(
         &mut self,
-        request: Option<StartStreamRequest>,
+        _request: Option<StartStreamRequest>,
     ) -> Result<StreamState, SessionError> {
-        let peer_id = self
-            .state
-            .active_peer_id
-            .clone()
-            .ok_or(SessionError::NotConnected)?;
-        let requested_screen_ids = request
-            .as_ref()
-            .map(|request| request.screen_ids.clone())
-            .unwrap_or_else(|| {
-                self.state
-                    .screens
-                    .iter()
-                    .map(|screen| screen.id.clone())
-                    .collect()
-            });
-        let screen_ids = if requested_screen_ids.is_empty() {
-            self.state
-                .screens
-                .iter()
-                .map(|screen| screen.id.clone())
-                .collect()
-        } else {
-            requested_screen_ids
-        };
-        let quality = request
-            .map(|request| request.quality)
-            .unwrap_or_else(|| "Low latency".into());
-        let target_fps = target_fps_for_quality(&quality);
-        let first_screen = self
-            .state
-            .screens
-            .iter()
-            .find(|screen| screen_ids.iter().any(|id| id == &screen.id))
-            .unwrap_or(&self.state.screens[0]);
-        let (width, height) =
-            parse_resolution(&first_screen.fitted_resolution).unwrap_or((1920, 1080));
+        if self.state.active_peer_id.is_none() {
+            return Err(SessionError::NotConnected);
+        }
 
-        self.state.status = ConnectionStatus::Connected;
-        self.state.metrics.fps = target_fps;
-        self.state.metrics.bitrate_mbps = bitrate_for_screens(self.state.screens.len());
+        self.state.metrics.fps = 0;
+        self.state.metrics.bitrate_mbps = 0.0;
         self.state.stream = StreamState {
-            status: StreamStatus::Live,
-            active_peer_id: Some(peer_id),
-            screen_ids,
+            status: StreamStatus::Idle,
+            active_peer_id: self.state.active_peer_id.clone(),
             screen_count: self.state.screens.len(),
-            codec: codec_for_quality(&quality).into(),
-            transport: TransportMode::LanQuic,
-            quality,
-            width,
-            height,
-            target_fps,
-            fps: self.state.metrics.fps,
-            bitrate_mbps: self.state.metrics.bitrate_mbps,
-            latency_ms: self.state.metrics.last_latency_ms,
-            jitter_ms: 1.2,
-            packet_loss: self.state.metrics.packet_loss,
-            frames_sent: 1,
-            dropped_frames: 0,
-            frame_id: 1,
-            audio_active: true,
-            microphone_active: true,
             updated_at_unix_ms: now_unix_ms(),
-            error: None,
-            last_frame: Some(frame_for_screen(1, &self.state.screens[0])),
-            message: "Low-latency LAN stream live".into(),
+            error: Some("Real video/audio transport is not implemented yet".into()),
+            message: "Connected; stream engine unavailable".into(),
+            ..StreamState::default()
         };
 
-        Ok(self.state.stream.clone())
+        Err(SessionError::StreamUnavailable)
     }
 
     pub fn stop_stream(&mut self) -> StreamState {
@@ -624,21 +574,6 @@ fn bitrate_for_screens(screen_count: usize) -> f32 {
     }
 }
 
-fn target_fps_for_quality(quality: &str) -> u16 {
-    match quality {
-        "Sharp" => 60,
-        "Balanced" => 90,
-        _ => 120,
-    }
-}
-
-fn codec_for_quality(quality: &str) -> &'static str {
-    match quality {
-        "Sharp" => "HEVC quality path",
-        _ => "H.264 low latency",
-    }
-}
-
 fn running_average(previous_average: f32, sample_count: u64, latest: u16) -> f32 {
     if sample_count <= 1 {
         return f32::from(latest);
@@ -711,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_lifecycle_tracks_frames() {
+    fn stream_start_is_not_faked_without_transport() {
         let mut manager = SessionManager::new();
         manager
             .connect(SessionConnectRequest {
@@ -720,20 +655,15 @@ mod tests {
             })
             .expect("connect should succeed");
 
-        let started = manager
-            .start_stream(Some(StartStreamRequest {
-                peer_id: "peer-a".into(),
-                screen_ids: vec!["screen-1".into()],
-                quality: "Low latency".into(),
-            }))
-            .expect("stream should start");
-        assert_eq!(started.status, StreamStatus::Live);
-        assert_eq!(started.frames_sent, 1);
-        assert_eq!(started.screen_ids, vec!["screen-1"]);
-
-        let next = manager.stream_state();
-        assert_eq!(next.frames_sent, 2);
-        assert!(next.last_frame.is_some());
+        let started = manager.start_stream(Some(StartStreamRequest {
+            peer_id: "peer-a".into(),
+            screen_ids: vec!["screen-1".into()],
+            quality: "Low latency".into(),
+        }));
+        assert_eq!(started, Err(SessionError::StreamUnavailable));
+        assert_eq!(manager.state().stream.status, StreamStatus::Idle);
+        assert_eq!(manager.state().stream.frames_sent, 0);
+        assert!(manager.state().stream.error.is_some());
 
         let stopped = manager.stop_stream();
         assert_eq!(stopped.status, StreamStatus::Idle);

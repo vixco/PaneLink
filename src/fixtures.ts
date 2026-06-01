@@ -8,7 +8,7 @@ export const fallbackPeers: Peer[] = [
     address: '192.168.1.24',
     lastSeen: 'Now',
     status: 'online',
-    trusted: true,
+    trusted: false,
     latencyMs: 7,
   },
   {
@@ -18,7 +18,7 @@ export const fallbackPeers: Peer[] = [
     address: '192.168.1.42',
     lastSeen: 'Now',
     status: 'online',
-    trusted: true,
+    trusted: false,
     latencyMs: 9,
   },
 ];

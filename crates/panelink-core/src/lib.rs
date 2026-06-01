@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::{fs, path::PathBuf, sync::OnceLock};
 use uuid::Uuid;
 
 pub mod display_plan;
@@ -205,9 +205,41 @@ pub enum TransportMode {
 pub fn local_peer_id() -> String {
     static LOCAL_PEER_ID: OnceLock<String> = OnceLock::new();
 
-    LOCAL_PEER_ID
-        .get_or_init(|| Uuid::new_v4().to_string())
-        .clone()
+    LOCAL_PEER_ID.get_or_init(load_or_create_peer_id).clone()
+}
+
+fn load_or_create_peer_id() -> String {
+    let path = peer_id_path();
+
+    if let Ok(peer_id) = fs::read_to_string(&path) {
+        let peer_id = peer_id.trim();
+        if !peer_id.is_empty() {
+            return peer_id.to_string();
+        }
+    }
+
+    let peer_id = Uuid::new_v4().to_string();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, &peer_id);
+    peer_id
+}
+
+fn peer_id_path() -> PathBuf {
+    if let Some(app_data) = std::env::var_os("APPDATA") {
+        return PathBuf::from(app_data).join("PaneLink").join("peer-id");
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("PaneLink")
+            .join("peer-id");
+    }
+
+    PathBuf::from(".panelink").join("peer-id")
 }
 
 pub fn demo_peers() -> Vec<Peer> {

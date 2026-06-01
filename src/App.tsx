@@ -24,7 +24,6 @@ import {
   listPeers,
   removeRemoteScreen,
   scanPeers,
-  startStream,
   stopStream,
 } from './tauri';
 import type { AudioDevice, Capabilities, Peer, PermissionState, RemoteScreen, SessionSnapshot, StreamState } from './types';
@@ -55,6 +54,10 @@ function App() {
   const [isBusy, setIsBusy] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [trustedPeerIds, setTrustedPeerIds] = useState<string[]>(() => loadTrustedPeerIds());
+  const [pairingPeerId, setPairingPeerId] = useState('');
+  const [pairingCode, setPairingCode] = useState('');
+  const [pairingError, setPairingError] = useState('');
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ state: 'idle', label: 'Updates ready' });
 
   useEffect(() => {
@@ -79,6 +82,8 @@ function App() {
   const screens = session?.screens ?? [];
   const isConnected = session?.status === 'connected' || session?.status === 'degraded';
   const isStreaming = stream?.status === 'streaming' || stream?.status === 'live';
+  const selectedPeerTrusted = selectedPeer ? trustedPeerIds.includes(selectedPeer.id) || selectedPeer.trusted : false;
+  const localPairingCode = data.capabilities?.peerId ? pairingCodeForPeer(data.capabilities.peerId) : 'laden...';
 
   async function loadEverything(scan = false) {
     setIsScanning(scan);
@@ -117,13 +122,15 @@ function App() {
         return;
       }
 
+      if (!selectedPeerTrusted) {
+        setPairingPeerId(selectedPeer.id);
+        setPairingCode('');
+        setPairingError('');
+        return;
+      }
+
       const nextSession = await connectPeer(selectedPeer.id);
-      const nextStream = await startStream({
-        peerId: selectedPeer.id,
-        screenIds: nextSession.screens.map((screen) => screen.id),
-        quality,
-      });
-      setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
+      setData((current) => ({ ...current, session: nextSession }));
     } finally {
       setIsBusy(false);
     }
@@ -135,14 +142,7 @@ function App() {
     setIsBusy(true);
     try {
       const nextSession = await addRemoteScreen(selectedPeer.id);
-      const nextStream = isConnected
-        ? await startStream({
-            peerId: selectedPeer.id,
-            screenIds: nextSession.screens.map((screen) => screen.id),
-            quality,
-          })
-        : data.stream;
-      setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
+      setData((current) => ({ ...current, session: nextSession }));
     } finally {
       setIsBusy(false);
     }
@@ -154,14 +154,7 @@ function App() {
     setIsBusy(true);
     try {
       const nextSession = await removeRemoteScreen(screenId);
-      const nextStream = isConnected
-        ? await startStream({
-            peerId: selectedPeer.id,
-            screenIds: nextSession.screens.map((screen) => screen.id),
-            quality,
-          })
-        : data.stream;
-      setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
+      setData((current) => ({ ...current, session: nextSession }));
     } finally {
       setIsBusy(false);
     }
@@ -173,6 +166,33 @@ function App() {
       await checkAndInstallUpdate(setUpdateStatus);
     } finally {
       setIsCheckingUpdate(false);
+    }
+  }
+
+  async function handlePairAndConnect() {
+    if (!selectedPeer) return;
+
+    const expectedCode = pairingCodeForPeer(selectedPeer.id);
+    const enteredCode = pairingCode.replace(/\D/g, '');
+
+    if (enteredCode !== expectedCode) {
+      setPairingError('Code klopt niet. Kijk op het andere apparaat bij Status.');
+      return;
+    }
+
+    const nextTrustedPeerIds = Array.from(new Set([...trustedPeerIds, selectedPeer.id]));
+    saveTrustedPeerIds(nextTrustedPeerIds);
+    setTrustedPeerIds(nextTrustedPeerIds);
+    setPairingPeerId('');
+    setPairingCode('');
+    setPairingError('');
+
+    setIsBusy(true);
+    try {
+      const nextSession = await connectPeer(selectedPeer.id);
+      setData((current) => ({ ...current, session: nextSession }));
+    } finally {
+      setIsBusy(false);
     }
   }
 
@@ -234,15 +254,47 @@ function App() {
                       {peer.os} · {peer.address}
                     </small>
                   </span>
-                  <em>{peer.status}</em>
+                  <em>{trustedPeerIds.includes(peer.id) || peer.trusted ? 'trusted' : 'pairing'}</em>
                 </button>
               ))}
             </div>
           )}
 
+          {selectedPeer && pairingPeerId === selectedPeer.id && (
+            <div className="pairing-box">
+              <strong>Voer de code van {selectedPeer.name} in</strong>
+              <span>Open PaneLink op dat apparaat en kijk bij Status naar Pairing code.</span>
+              <input
+                autoFocus
+                inputMode="numeric"
+                maxLength={6}
+                onChange={(event) => {
+                  setPairingCode(event.target.value.replace(/\D/g, '').slice(0, 6));
+                  setPairingError('');
+                }}
+                placeholder="6 cijfers"
+                value={pairingCode}
+              />
+              {pairingError && <small>{pairingError}</small>}
+              <div>
+                <button className="secondary-action" onClick={() => setPairingPeerId('')}>Annuleer</button>
+                <button className="primary-action compact" disabled={pairingCode.length !== 6 || isBusy} onClick={handlePairAndConnect}>
+                  {isBusy ? <Loader2 className="spin" size={16} /> : <CheckCircle2 size={16} />}
+                  Pair en verbind
+                </button>
+              </div>
+            </div>
+          )}
+
           <button className="primary-action" disabled={isBusy || !selectedPeer} onClick={handleConnect}>
             {isBusy ? <Loader2 className="spin" size={18} /> : <Monitor size={18} />}
-            {isConnected ? 'Verbinding stoppen' : selectedPeer ? `Verbind met ${selectedPeer.name}` : 'Geen apparaat gevonden'}
+            {isConnected
+              ? 'Verbinding stoppen'
+              : selectedPeer && !selectedPeerTrusted
+                ? `Pair met ${selectedPeer.name}`
+                : selectedPeer
+                  ? `Verbind met ${selectedPeer.name}`
+                  : 'Geen apparaat gevonden'}
           </button>
         </div>
 
@@ -266,8 +318,8 @@ function App() {
             </div>
             <div className="preview-copy">
               <Monitor size={30} />
-              <strong>{isStreaming ? 'Live stream actief' : 'Wacht op verbinding'}</strong>
-              <span>{isConnected ? 'Auto-fit resolutie en audio staan klaar.' : 'Klik links op verbinden.'}</span>
+              <strong>{isStreaming ? 'Stream gestart' : isConnected ? 'Verbonden, stream nog niet actief' : 'Wacht op verbinding'}</strong>
+              <span>{isConnected ? 'Pairing en scherm-layout staan klaar. Echte video/audio transport volgt hierna.' : 'Klik links op verbinden.'}</span>
             </div>
           </div>
         </div>
@@ -335,6 +387,7 @@ function App() {
             {isCheckingUpdate ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
             Check for update
           </button>
+          <small className="muted">Pairing code: {localPairingCode}</small>
           <small className="muted">Update: {updateStatus.label}</small>
           <small className="muted">Peer ID: {data.capabilities?.peerId ?? 'laden...'}</small>
           {data.permissions.slice(0, 2).map((permission) => (
@@ -366,6 +419,27 @@ function AudioLine({ label, devices }: { label: string; devices: AudioDevice[] }
       <strong>{device?.name ?? 'System default'}</strong>
     </div>
   );
+}
+
+function pairingCodeForPeer(peerId: string) {
+  let hash = 0;
+  for (const char of peerId) {
+    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  }
+
+  return String(hash % 1_000_000).padStart(6, '0');
+}
+
+function loadTrustedPeerIds() {
+  try {
+    return JSON.parse(window.localStorage.getItem('panelink.trustedPeerIds') ?? '[]') as string[];
+  } catch {
+    return [];
+  }
+}
+
+function saveTrustedPeerIds(peerIds: string[]) {
+  window.localStorage.setItem('panelink.trustedPeerIds', JSON.stringify(peerIds));
 }
 
 export default App;
