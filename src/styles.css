@@ -208,6 +208,89 @@ h2 { font-size: 16px; }
   opacity: 0.62;
 }
 
+.screen-slots {
+  display: grid;
+  gap: 8px;
+}
+
+.screen-slot {
+  min-height: 50px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  display: grid;
+  grid-template-columns: 28px minmax(130px, 1fr) minmax(160px, 1.2fr) auto 34px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+}
+
+.screen-slot > span {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: #edf4ff;
+  color: var(--blue);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.screen-slot strong,
+.screen-slot small,
+.screen-slot em {
+  min-width: 0;
+}
+
+.screen-slot strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.screen-slot small {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.screen-slot em {
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: #eef3f7;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.screen-slot em.connected {
+  background: rgba(26, 155, 104, 0.1);
+  color: var(--green);
+}
+
+.screen-slot button {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.screen-slot button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .display-preview {
   min-height: 0;
   display: grid;
@@ -291,6 +374,41 @@ h2 { font-size: 16px; }
 }
 .preview-copy span { color: #aebdca; }
 
+.stream-strip {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  min-width: 0;
+}
+
+.stream-strip strong {
+  color: var(--text);
+  text-transform: capitalize;
+}
+
+.stream-strip span {
+  white-space: nowrap;
+}
+
+.stream-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  flex: 0 0 auto;
+}
+
+.stream-dot.live {
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgba(26, 155, 104, 0.12);
+}
+
 .right-stack { display: grid; gap: 16px; align-content: start; }
 .compact { box-shadow: none; }
 .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -299,6 +417,30 @@ h2 { font-size: 16px; }
 .metric span { color: var(--muted); font-size: 12px; }
 .metric strong { font-size: 18px; margin-top: 4px; }
 .good { color: var(--green); }
+.stream-card {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 8px;
+  padding: 11px;
+  margin-top: 8px;
+}
+
+.stream-card span,
+.stream-card strong,
+.stream-card small {
+  display: block;
+}
+
+.stream-card span,
+.stream-card small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.stream-card strong {
+  margin: 3px 0;
+  text-transform: capitalize;
+}
 .select-row + .select-row { margin-top: 8px; }
 .meter { height: 34px; display: flex; align-items: end; gap: 5px; margin-top: 12px; }
 .meter span { flex: 1; border-radius: 4px 4px 0 0; background: var(--green); }
@@ -340,3 +482,57 @@ h2 { font-size: 16px; }
 .quality-control { margin-left: auto; border: 1px solid var(--line); border-radius: 8px; padding: 3px; display: flex; gap: 3px; }
 .quality-control button { border: 0; background: transparent; border-radius: 6px; padding: 6px 10px; color: var(--muted); cursor: pointer; }
 .quality-control button.active { color: var(--text); background: #edf4ff; }
+
+@media (max-width: 900px) {
+  body { min-width: 0; }
+
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .workspace {
+    padding: 16px;
+  }
+
+  .topbar {
+    display: grid;
+  }
+
+  .content-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .device-bridge {
+    grid-template-columns: 1fr;
+  }
+
+  .link-rail {
+    display: none;
+  }
+
+  .screen-slot {
+    grid-template-columns: 28px minmax(0, 1fr) 34px;
+  }
+
+  .screen-slot small,
+  .screen-slot em {
+    grid-column: 2 / 3;
+  }
+
+  .statusbar {
+    flex-wrap: wrap;
+  }
+
+  .quality-control {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .quality-control button {
+    flex: 1;
+  }
+}

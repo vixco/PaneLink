@@ -1,17 +1,76 @@
 import { invoke } from '@tauri-apps/api/core';
-import { fallbackCapabilities, fallbackDevices, fallbackPeers, fallbackPermissions, fallbackSession } from './fixtures';
-import type { AudioDevice, Capabilities, Peer, PermissionState, SessionSnapshot } from './types';
+import {
+  fallbackCapabilities,
+  fallbackDevices,
+  fallbackPeers,
+  fallbackPermissions,
+  fallbackSession,
+  fallbackStreamState,
+} from './fixtures';
+import type {
+  AudioDevice,
+  Capabilities,
+  Peer,
+  PermissionState,
+  RemoteScreen,
+  SessionSnapshot,
+  StartStreamRequest,
+  StreamState,
+} from './types';
 
 const isTauri = '__TAURI_INTERNALS__' in window;
+let browserSession: SessionSnapshot = fallbackSession;
+let browserStream: StreamState = fallbackStreamState;
 
-async function call<T>(command: string, fallback: T): Promise<T> {
+function withNow<T extends { updatedAt?: string }>(value: T): T {
+  return { ...value, updatedAt: new Date().toISOString() };
+}
+
+function screenResolution(screen: RemoteScreen) {
+  const match = screen.fittedResolution.match(/(\d+)\s*x\s*(\d+)/i);
+  return {
+    width: Number(match?.[1] ?? 2560),
+    height: Number(match?.[2] ?? 1440),
+  };
+}
+
+function streamForSession(request: StartStreamRequest, session: SessionSnapshot): StreamState {
+  const firstScreen = session.screens.find((screen) => request.screenIds.includes(screen.id)) ?? session.screens[0];
+  const resolution = firstScreen ? screenResolution(firstScreen) : { width: 2560, height: 1440 };
+  const multiplier = Math.max(request.screenIds.length, 1);
+  const qualityFps = request.quality === 'Sharp' ? 60 : request.quality === 'Balanced' ? 90 : 120;
+
+  return withNow({
+    ...browserStream,
+    status: 'streaming',
+    activePeerId: request.peerId,
+    screenIds: request.screenIds,
+    codec: request.quality === 'Sharp' ? 'HEVC quality path' : 'H.264 low latency',
+    transport: session.transport,
+    quality: request.quality,
+    width: resolution.width * multiplier,
+    height: resolution.height,
+    targetFps: qualityFps,
+    fps: qualityFps,
+    bitrateMbps: Math.round(session.bitrateMbps * multiplier * (request.quality === 'Sharp' ? 1.25 : 1)),
+    latencyMs: session.latencyMs,
+    jitterMs: 1.8,
+    packetLoss: session.packetLoss,
+    frameId: browserStream.frameId + 1,
+    audioActive: true,
+    microphoneActive: true,
+    error: null,
+  });
+}
+
+async function call<T>(command: string, fallback: T, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri) {
     await new Promise((resolve) => setTimeout(resolve, 180));
     return fallback;
   }
 
   try {
-    return await invoke<T>(command);
+    return await invoke<T>(command, args);
   } catch (error) {
     console.warn(`PaneLink command failed: ${command}`, error);
     return fallback;
@@ -27,7 +86,7 @@ export function listPeers() {
 }
 
 export function getSession() {
-  return call<SessionSnapshot>('get_session_snapshot', fallbackSession);
+  return call<SessionSnapshot>('get_session_snapshot', browserSession);
 }
 
 export function listAudioDevices() {
@@ -41,7 +100,15 @@ export function getPermissions() {
 export function connectPeer(peerId: string) {
   if (!isTauri) {
     return new Promise<SessionSnapshot>((resolve) =>
-      setTimeout(() => resolve({ ...fallbackSession, status: 'connected', activePeerId: peerId }), 350),
+      setTimeout(() => {
+        browserSession = {
+          ...browserSession,
+          status: 'connected',
+          activePeerId: peerId,
+          screens: browserSession.screens.map((screen) => ({ ...screen, status: 'connected' })),
+        };
+        resolve(browserSession);
+      }, 350),
     );
   }
 
@@ -51,9 +118,114 @@ export function connectPeer(peerId: string) {
 export function disconnectPeer() {
   if (!isTauri) {
     return new Promise<SessionSnapshot>((resolve) =>
-      setTimeout(() => resolve({ ...fallbackSession, status: 'ready', activePeerId: null }), 180),
+      setTimeout(() => {
+        browserStream = withNow({ ...browserStream, status: 'idle', activePeerId: null, screenIds: [], fps: 0, bitrateMbps: 0 });
+        browserSession = {
+          ...browserSession,
+          status: 'ready',
+          activePeerId: null,
+          screens: browserSession.screens.map((screen) => ({ ...screen, status: 'ready' })),
+        };
+        resolve(browserSession);
+      }, 180),
     );
   }
 
   return invoke<SessionSnapshot>('disconnect_peer');
+}
+
+export function getStreamState() {
+  if (!isTauri && browserStream.status === 'streaming') {
+    browserStream = withNow({
+      ...browserStream,
+      frameId: browserStream.frameId + Math.max(Math.round(browserStream.fps / 2), 1),
+      latencyMs: Math.max(4, browserSession.latencyMs + Math.round(Math.sin(Date.now() / 900) * 2)),
+      jitterMs: Number((1.4 + Math.abs(Math.sin(Date.now() / 700))).toFixed(1)),
+    });
+  }
+
+  return call<StreamState>('get_stream_state', browserStream);
+}
+
+export function startStream(request: StartStreamRequest) {
+  if (!isTauri) {
+    return new Promise<StreamState>((resolve) =>
+      setTimeout(() => {
+        browserStream = streamForSession(request, browserSession);
+        resolve(browserStream);
+      }, 240),
+    );
+  }
+
+  return call<StreamState>('start_stream', streamForSession(request, browserSession), { request });
+}
+
+export function stopStream() {
+  if (!isTauri) {
+    return new Promise<StreamState>((resolve) =>
+      setTimeout(() => {
+        browserStream = withNow({
+          ...browserStream,
+          status: 'idle',
+          activePeerId: null,
+          screenIds: [],
+          fps: 0,
+          bitrateMbps: 0,
+          frameId: browserStream.frameId + 1,
+        });
+        resolve(browserStream);
+      }, 140),
+    );
+  }
+
+  return call<StreamState>('stop_stream', withNow({ ...browserStream, status: 'idle' }));
+}
+
+export function addRemoteScreen(peerId: string) {
+  const index = browserSession.screens.length;
+  const nextScreen: RemoteScreen = {
+    id: `screen-${index + 1}`,
+    name: `Remote screen ${index + 1}`,
+    role: index === 0 ? 'primary' : 'extended',
+    sourceDisplay: `Virtual Display ${index + 1}`,
+    targetDisplay: `Windows Display ${index + 1}`,
+    nativeResolution: index === 1 ? '1920 x 1080 @ 144 Hz' : '1440 x 900 @ 60 Hz',
+    fittedResolution: index === 1 ? '1920 x 1080 @ 120 Hz' : '1440 x 900 @ 60 Hz',
+    scaleMode: 'auto-fit',
+    status: browserSession.status === 'connected' ? 'connected' : 'ready',
+  };
+  const fallback = { ...browserSession, activePeerId: peerId, screens: [...browserSession.screens, nextScreen] };
+
+  if (!isTauri) {
+    return new Promise<SessionSnapshot>((resolve) =>
+      setTimeout(() => {
+        browserSession = fallback;
+        resolve(browserSession);
+      }, 180),
+    );
+  }
+
+  return call<SessionSnapshot>('add_remote_screen', fallback, { peerId });
+}
+
+export function removeRemoteScreen(screenId: string) {
+  const nextScreens = browserSession.screens.length === 1
+    ? browserSession.screens
+    : browserSession.screens.filter((screen) => screen.id !== screenId);
+  const fallback = { ...browserSession, screens: nextScreens };
+
+  if (!isTauri) {
+    return new Promise<SessionSnapshot>((resolve) =>
+      setTimeout(() => {
+        browserSession = fallback;
+        browserStream = withNow({
+          ...browserStream,
+          screenIds: browserStream.screenIds.filter((id) => id !== screenId),
+        });
+        resolve(browserSession);
+      }, 140),
+    );
+  }
+
+  return call<SessionSnapshot>('remove_remote_screen', fallback, { screenId });
 }

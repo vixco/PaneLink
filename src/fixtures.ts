@@ -1,4 +1,4 @@
-import type { AudioDevice, Capabilities, Peer, PermissionState, SessionSnapshot } from './types';
+import type { AudioDevice, Capabilities, Peer, PermissionState, SessionSnapshot, StreamState } from './types';
 
 export const fallbackPeers: Peer[] = [
   {
@@ -96,4 +96,26 @@ export const fallbackSession: SessionSnapshot = {
   transport: 'Local preview',
   audioOutput: 'System Default Output',
   micInput: 'System Default Microphone',
+};
+
+export const fallbackStreamState: StreamState = {
+  status: 'idle',
+  activePeerId: null,
+  screenIds: [],
+  codec: 'H.264 low latency',
+  transport: 'Local preview',
+  quality: 'Low latency',
+  width: 0,
+  height: 0,
+  targetFps: 120,
+  fps: 0,
+  bitrateMbps: 0,
+  latencyMs: 0,
+  jitterMs: 0,
+  packetLoss: 0,
+  frameId: 0,
+  audioActive: true,
+  microphoneActive: true,
+  updatedAt: new Date().toISOString(),
+  error: null,
 };

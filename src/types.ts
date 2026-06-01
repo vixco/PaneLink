@@ -1,4 +1,5 @@
 export type ConnectionStatus = 'ready' | 'connecting' | 'connected' | 'degraded' | 'offline';
+export type StreamStatus = 'idle' | 'starting' | 'streaming' | 'live' | 'stopping' | 'error';
 
 export type Peer = {
   id: string;
@@ -59,6 +60,34 @@ export type SessionSnapshot = {
   transport: 'LAN QUIC' | 'WebRTC' | 'Local preview';
   audioOutput: string;
   micInput: string;
+};
+
+export type StreamState = {
+  status: StreamStatus;
+  activePeerId: string | null;
+  screenIds: string[];
+  codec: string;
+  transport: 'LAN QUIC' | 'WebRTC' | 'Local preview';
+  quality: 'Low latency' | 'Balanced' | 'Sharp';
+  width: number;
+  height: number;
+  targetFps: number;
+  fps: number;
+  bitrateMbps: number;
+  latencyMs: number;
+  jitterMs: number;
+  packetLoss: number;
+  frameId: number;
+  audioActive: boolean;
+  microphoneActive: boolean;
+  updatedAt: string;
+  error: string | null;
+};
+
+export type StartStreamRequest = {
+  peerId: string;
+  screenIds: string[];
+  quality: StreamState['quality'];
 };
 
 export type RemoteScreen = {

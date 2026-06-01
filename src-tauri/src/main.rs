@@ -30,6 +30,11 @@ fn get_transport_state() -> panelink_transport::SessionState {
 }
 
 #[tauri::command]
+fn get_stream_state() -> panelink_transport::StreamState {
+    panelink_transport::stream_state()
+}
+
+#[tauri::command]
 fn connect_peer(peer_id: String) -> Result<SessionSnapshot, panelink_transport::SessionError> {
     panelink_transport::connect_peer(peer_id)
 }
@@ -37,6 +42,32 @@ fn connect_peer(peer_id: String) -> Result<SessionSnapshot, panelink_transport::
 #[tauri::command]
 fn disconnect_peer() -> SessionSnapshot {
     panelink_transport::disconnect_peer()
+}
+
+#[tauri::command]
+fn start_stream(
+    request: Option<panelink_transport::StartStreamRequest>,
+) -> Result<panelink_transport::StreamState, panelink_transport::SessionError> {
+    panelink_transport::start_stream(request)
+}
+
+#[tauri::command]
+fn stop_stream() -> panelink_transport::StreamState {
+    panelink_transport::stop_stream()
+}
+
+#[tauri::command]
+fn add_remote_screen(
+    _peer_id: Option<String>,
+) -> Result<SessionSnapshot, panelink_transport::SessionError> {
+    panelink_transport::add_remote_screen()
+}
+
+#[tauri::command]
+fn remove_remote_screen(
+    screen_id: String,
+) -> Result<SessionSnapshot, panelink_transport::SessionError> {
+    panelink_transport::remove_remote_screen(screen_id)
 }
 
 #[tauri::command]
@@ -142,8 +173,13 @@ fn main() {
             issue_pairing_token,
             get_session_snapshot,
             get_transport_state,
+            get_stream_state,
             connect_peer,
             disconnect_peer,
+            start_stream,
+            stop_stream,
+            add_remote_screen,
+            remove_remote_screen,
             ping_peer,
             list_audio_devices,
             get_audio_route_catalog,

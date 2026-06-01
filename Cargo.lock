@@ -2310,7 +2310,7 @@ dependencies = [
 
 [[package]]
 name = "panelink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "panelink-audio",
  "panelink-capture",

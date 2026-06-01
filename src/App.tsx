@@ -26,13 +26,18 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   connectPeer,
   disconnectPeer,
+  addRemoteScreen,
   getCapabilities,
   getPermissions,
   getSession,
+  getStreamState,
   listAudioDevices,
   listPeers,
+  removeRemoteScreen,
+  startStream,
+  stopStream,
 } from './tauri';
-import type { AudioDevice, Capabilities, Peer, PermissionState, RemoteScreen, SessionSnapshot } from './types';
+import type { AudioDevice, Capabilities, Peer, PermissionState, RemoteScreen, SessionSnapshot, StreamState } from './types';
 import { checkAndInstallUpdate, type UpdateStatus } from './updater';
 
 type AppData = {
@@ -41,6 +46,7 @@ type AppData = {
   capabilities: Capabilities | null;
   audioDevices: AudioDevice[];
   permissions: PermissionState[];
+  stream: StreamState | null;
 };
 
 const navItems = [
@@ -51,6 +57,8 @@ const navItems = [
   { label: 'Settings', icon: Settings },
 ];
 
+const qualityOptions = ['Low latency', 'Balanced', 'Sharp'] as const;
+
 function App() {
   const [data, setData] = useState<AppData>({
     peers: [],
@@ -58,17 +66,18 @@ function App() {
     capabilities: null,
     audioDevices: [],
     permissions: [],
+    stream: null,
   });
   const [selectedPeerId, setSelectedPeerId] = useState('windows-desk');
-  const [quality, setQuality] = useState('Low latency');
+  const [quality, setQuality] = useState<StreamState['quality']>('Low latency');
   const [screens, setScreens] = useState<RemoteScreen[]>([]);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ state: 'idle', label: 'Updates ready' });
   const [isBusy, setIsBusy] = useState(false);
 
   useEffect(() => {
-    Promise.all([listPeers(), getSession(), getCapabilities(), listAudioDevices(), getPermissions()]).then(
-      ([peers, session, capabilities, audioDevices, permissions]) => {
-        setData({ peers, session, capabilities, audioDevices, permissions });
+    Promise.all([listPeers(), getSession(), getCapabilities(), listAudioDevices(), getPermissions(), getStreamState()]).then(
+      ([peers, session, capabilities, audioDevices, permissions, stream]) => {
+        setData({ peers, session, capabilities, audioDevices, permissions, stream });
         setSelectedPeerId(session.activePeerId ?? peers[0]?.id ?? '');
         setScreens(session.screens);
       },
@@ -79,51 +88,91 @@ function App() {
     void checkAndInstallUpdate(setUpdateStatus);
   }, []);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      Promise.all([getSession(), getStreamState(), listPeers()]).then(([session, stream, peers]) => {
+        setData((current) => ({ ...current, session, stream, peers }));
+        setScreens(session.screens);
+      });
+    }, 1200);
+
+    return () => window.clearInterval(timer);
+  }, []);
+
   const selectedPeer = useMemo(
     () => data.peers.find((peer) => peer.id === selectedPeerId) ?? data.peers[0],
     [data.peers, selectedPeerId],
   );
   const session = data.session;
   const isConnected = session?.status === 'connected' || session?.status === 'degraded';
+  const stream = data.stream;
+  const isStreaming = stream?.status === 'streaming' || stream?.status === 'live';
 
   async function handleSwitch() {
     if (!selectedPeer) return;
     setIsBusy(true);
-    const next = isConnected ? await disconnectPeer() : await connectPeer(selectedPeer.id);
-    setData((current) => ({ ...current, session: next }));
-    setScreens((current) =>
-      current.map((screen) => ({
-        ...screen,
-        status: next.status === 'connected' ? 'connected' : 'rollback-pending',
-      })),
-    );
-    setIsBusy(false);
+    try {
+      if (isConnected) {
+        const nextStream = await stopStream();
+        const next = await disconnectPeer();
+        setData((current) => ({ ...current, session: next, stream: nextStream }));
+        setScreens(next.screens);
+        return;
+      }
+
+      const next = await connectPeer(selectedPeer.id);
+      const nextStream = await startStream({
+        peerId: selectedPeer.id,
+        screenIds: next.screens.map((screen) => screen.id),
+        quality,
+      });
+      setData((current) => ({ ...current, session: next, stream: nextStream }));
+      setScreens(next.screens);
+    } finally {
+      setIsBusy(false);
+    }
   }
 
-  function addScreen() {
-    setScreens((current) => {
-      if (current.length >= 3) return current;
-      const index = current.length;
+  async function addScreen() {
+    if (!selectedPeer || screens.length >= 3) return;
+    setIsBusy(true);
+    try {
+      const next = await addRemoteScreen(selectedPeer.id);
+      setData((current) => ({ ...current, session: next }));
+      setScreens(next.screens);
 
-      return [
-        ...current,
-        {
-          id: `screen-${index + 1}`,
-          name: `Remote screen ${index + 1}`,
-          role: 'extended',
-          sourceDisplay: `Virtual Display ${index + 1}`,
-          targetDisplay: `Windows Display ${index + 1}`,
-          nativeResolution: index === 1 ? '1920 x 1080 @ 144 Hz' : '1440 x 900 @ 60 Hz',
-          fittedResolution: index === 1 ? '1920 x 1080 @ 120 Hz' : '1440 x 900 @ 60 Hz',
-          scaleMode: 'auto-fit',
-          status: isConnected ? 'connected' : 'ready',
-        },
-      ];
-    });
+      if (isConnected) {
+        const nextStream = await startStream({
+          peerId: selectedPeer.id,
+          screenIds: next.screens.map((screen) => screen.id),
+          quality,
+        });
+        setData((current) => ({ ...current, stream: nextStream }));
+      }
+    } finally {
+      setIsBusy(false);
+    }
   }
 
-  function removeScreen(id: string) {
-    setScreens((current) => (current.length === 1 ? current : current.filter((screen) => screen.id !== id)));
+  async function removeScreen(id: string) {
+    if (screens.length === 1) return;
+    setIsBusy(true);
+    try {
+      const next = await removeRemoteScreen(id);
+      setData((current) => ({ ...current, session: next }));
+      setScreens(next.screens);
+
+      if (isConnected && selectedPeer) {
+        const nextStream = await startStream({
+          peerId: selectedPeer.id,
+          screenIds: next.screens.map((screen) => screen.id),
+          quality,
+        });
+        setData((current) => ({ ...current, stream: nextStream }));
+      }
+    } finally {
+      setIsBusy(false);
+    }
   }
 
   return (
@@ -230,7 +279,7 @@ function App() {
                   {screens.length} remote display{screens.length > 1 ? 's' : ''}
                 </h2>
               </div>
-              <button className="secondary-action" disabled={screens.length >= 3} onClick={addScreen}>
+              <button className="secondary-action" disabled={isBusy || screens.length >= 3} onClick={addScreen}>
                 <Plus size={15} />
                 Add screen
               </button>
@@ -260,8 +309,8 @@ function App() {
               <div className="preview-toolbar">
                 <span>{session?.display ?? 'Display preview'}</span>
                 <div>
-                  <button>Fit</button>
-                  <button>Fullscreen</button>
+                  <button>{stream?.quality ?? quality}</button>
+                  <button>{isStreaming ? 'Live' : 'Standby'}</button>
                 </div>
               </div>
               <div className="preview-frame">
@@ -275,12 +324,23 @@ function App() {
                 </div>
                 <div className="preview-copy">
                   <Monitor size={28} />
-                  <strong>{isConnected ? 'Live display stream active' : 'Ready to start direct display session'}</strong>
+                  <strong>{isStreaming ? 'Live display stream active' : 'Ready to start direct display session'}</strong>
                   <span>
-                    {session?.resolution ?? 'No resolution negotiated yet'} - auto-fit and rollback enabled
+                    {stream && stream.width > 0
+                      ? `${stream.width} x ${stream.height} - frame ${stream.frameId.toLocaleString()}`
+                      : (session?.resolution ?? 'No resolution negotiated yet')}{' '}
+                    - auto-fit and rollback enabled
                   </span>
                 </div>
               </div>
+            </div>
+            <div className="stream-strip">
+              <span className={isStreaming ? 'stream-dot live' : 'stream-dot'} />
+              <strong>{stream?.status ?? 'idle'}</strong>
+              <span>{stream?.codec ?? session?.encoder ?? 'Encoder ready'}</span>
+              <span>{stream?.fps ?? session?.fps ?? 0} FPS</span>
+              <span>{stream?.latencyMs ?? session?.latencyMs ?? 0} ms</span>
+              <span>{stream?.jitterMs ?? 0} ms jitter</span>
             </div>
             <div className="rollback-strip">
               <RotateCcw size={15} />
@@ -289,7 +349,7 @@ function App() {
           </section>
 
           <aside className="right-stack">
-            <MetricPanel session={session} />
+            <MetricPanel session={session} stream={stream} />
             <AudioPanel devices={data.audioDevices} />
             <PermissionsPanel permissions={data.permissions} capabilities={data.capabilities} />
           </aside>
@@ -303,14 +363,27 @@ function App() {
             <Cpu size={14} /> {session?.encoder ?? 'H.264 low latency'}
           </span>
           <span>
-            <Activity size={14} /> {session?.fps ?? 0} FPS
+            <Activity size={14} /> {stream?.fps ?? session?.fps ?? 0} FPS
           </span>
           <span>
-            <Gauge size={14} /> {session?.bitrateMbps ?? 0} Mbps
+            <Gauge size={14} /> {stream?.bitrateMbps ?? session?.bitrateMbps ?? 0} Mbps
           </span>
           <div className="quality-control">
-            {['Low latency', 'Balanced', 'Sharp'].map((option) => (
-              <button className={quality === option ? 'active' : ''} key={option} onClick={() => setQuality(option)}>
+            {qualityOptions.map((option) => (
+              <button
+                className={quality === option ? 'active' : ''}
+                key={option}
+                onClick={() => {
+                  setQuality(option);
+                  if (isConnected && selectedPeer) {
+                    void startStream({
+                      peerId: selectedPeer.id,
+                      screenIds: screens.map((screen) => screen.id),
+                      quality: option,
+                    }).then((nextStream) => setData((current) => ({ ...current, stream: nextStream })));
+                  }
+                }}
+              >
                 {option}
               </button>
             ))}
@@ -332,7 +405,7 @@ function DeviceEndpoint({ title, subtitle, os, active = false }: { title: string
   );
 }
 
-function MetricPanel({ session }: { session: SessionSnapshot | null }) {
+function MetricPanel({ session, stream }: { session: SessionSnapshot | null; stream: StreamState | null }) {
   return (
     <section className="panel compact">
       <div className="panel-header">
@@ -340,10 +413,18 @@ function MetricPanel({ session }: { session: SessionSnapshot | null }) {
         <SlidersHorizontal size={17} />
       </div>
       <div className="metrics">
-        <Metric label="Latency" value={`${session?.latencyMs ?? 0} ms`} good />
-        <Metric label="Frame rate" value={`${session?.fps ?? 0} FPS`} />
-        <Metric label="Bitrate" value={`${session?.bitrateMbps ?? 0} Mbps`} />
-        <Metric label="Loss" value={`${session?.packetLoss ?? 0}%`} good />
+        <Metric label="Latency" value={`${stream?.latencyMs ?? session?.latencyMs ?? 0} ms`} good />
+        <Metric label="Frame rate" value={`${stream?.fps ?? session?.fps ?? 0} FPS`} />
+        <Metric label="Bitrate" value={`${stream?.bitrateMbps ?? session?.bitrateMbps ?? 0} Mbps`} />
+        <Metric label="Loss" value={`${stream?.packetLoss ?? session?.packetLoss ?? 0}%`} good />
+      </div>
+      <div className="stream-card">
+        <span>Stream</span>
+        <strong>{stream?.status ?? 'idle'}</strong>
+        <small>
+          {stream?.screenIds.length ?? 0} screen{stream?.screenIds.length === 1 ? '' : 's'} - audio{' '}
+          {stream?.audioActive ? 'on' : 'ready'} - mic {stream?.microphoneActive ? 'on' : 'ready'}
+        </small>
       </div>
     </section>
   );
