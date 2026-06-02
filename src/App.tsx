@@ -19,12 +19,14 @@ import {
   disconnectPeer,
   fetchRemoteFrame,
   getCapabilities,
+  getFrameServerLanUrl,
   getPermissions,
   getSession,
   getStreamState,
   listAudioDevices,
   listPeers,
   openDisplayWindow,
+  openRemoteDisplayWindow,
   removeRemoteScreen,
   runNativeSetup,
   scanPeers,
@@ -151,7 +153,6 @@ function ControlApp() {
       screenIds: nextSession.screens.map((screen) => screen.id),
       quality,
     });
-    const frameUrl = frameUrlForPeer(peer);
 
     if (!displayPipelineReady) {
       await closeDisplayWindow();
@@ -165,15 +166,28 @@ function ControlApp() {
       return nextStream;
     }
 
-    const nextDisplayWindow = await openDisplayWindow({
-      peerId: peer.id,
-      peerAddress: frameUrl,
-      screenCount: nextSession.screens.length,
-      quality,
-    });
+    const nextDisplayWindow = await openDisplayForPeer(peer, nextSession.screens.length);
     setDisplayWindow(nextDisplayWindow);
 
     return nextStream;
+  }
+
+  async function openDisplayForPeer(peer: Peer, screenCount: number) {
+    const localPlatform = data.capabilities?.platform.toLowerCase() ?? '';
+    const localPeerId = data.capabilities?.peerId ?? 'local-source';
+    const shouldOpenOnReceiver = localPlatform === 'macos' && peer.os === 'Windows';
+    const request: DisplayWindowRequest = {
+      peerId: shouldOpenOnReceiver ? localPeerId : peer.id,
+      peerAddress: shouldOpenOnReceiver ? await getFrameServerLanUrl() : frameUrlForPeer(peer),
+      screenCount: Math.max(screenCount, 1),
+      quality,
+    };
+
+    if (shouldOpenOnReceiver) {
+      return openRemoteDisplayWindow(peer.address, request);
+    }
+
+    return openDisplayWindow(request);
   }
 
   async function loadEverything(scan = false) {
@@ -278,12 +292,7 @@ function ControlApp() {
         return;
       }
 
-      const nextDisplayWindow = await openDisplayWindow({
-        peerId: selectedPeer.id,
-        peerAddress: frameUrlForPeer(selectedPeer),
-        screenCount: Math.max(screens.length, 1),
-        quality,
-      });
+      const nextDisplayWindow = await openDisplayForPeer(selectedPeer, Math.max(screens.length, 1));
       setDisplayWindow(nextDisplayWindow);
     } finally {
       setIsBusy(false);
@@ -621,7 +630,11 @@ function DisplayWindow() {
             {frameSrc ? (
               <img alt={`PaneLink screen ${screen}`} className="display-window-frame" src={frameSrc} />
             ) : (
-              <div className="display-window-placeholder" />
+              <div className={frameError ? 'display-window-placeholder error' : 'display-window-placeholder'}>
+                <Loader2 className="spin" size={24} />
+                <strong>{frameError ? 'Geen frame ontvangen' : 'Frame fetch actief'}</strong>
+                <small>{frameError || config.peerAddress || 'Geen frame URL'}</small>
+              </div>
             )}
             <div className="display-window-label">
               <span>Screen {screen}</span>

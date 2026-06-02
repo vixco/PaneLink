@@ -15,6 +15,7 @@ import type {
   NativeSetupState,
   Peer,
   PermissionState,
+  RemoteDisplayResponse,
   RemoteFrameResponse,
   RemoteScreen,
   SessionSnapshot,
@@ -216,6 +217,27 @@ export function openDisplayWindow(request: DisplayWindowRequest) {
   ).then(() => ({ attached: true, message: 'Display window opened' }));
 }
 
+export function openRemoteDisplayWindow(receiverAddress: string, request: DisplayWindowRequest) {
+  if (!isTauri) {
+    return openDisplayWindow(request);
+  }
+
+  return call<RemoteDisplayResponse>(
+    'open_remote_display_window',
+    { ok: false, message: 'Receiver display command failed' },
+    {
+      receiverAddress,
+      peerId: request.peerId,
+      peerAddress: request.peerAddress,
+      screenCount: request.screenCount,
+      quality: request.quality,
+    },
+  ).then((response) => ({
+    attached: response.ok,
+    message: response.message,
+  }));
+}
+
 export function closeDisplayWindow() {
   if (!isTauri) {
     browserDisplayWindow?.close();
@@ -239,6 +261,10 @@ export function runNativeSetup() {
 
 export function getFrameServerUrl() {
   return call<string>('get_frame_server_url', 'http://127.0.0.1:48171/frame');
+}
+
+export function getFrameServerLanUrl() {
+  return call<string>('get_frame_server_lan_url', 'http://127.0.0.1:48171/frame');
 }
 
 export async function fetchRemoteFrame(url: string) {

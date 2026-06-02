@@ -3060,6 +3060,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "tiny_http",
 ]
 
 [[package]]

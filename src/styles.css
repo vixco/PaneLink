@@ -556,6 +556,27 @@ button:disabled {
   background: #000;
 }
 
+.display-window-placeholder {
+  color: #d7e6f8;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+}
+
+.display-window-placeholder strong,
+.display-window-placeholder small {
+  max-width: min(680px, calc(100vw - 80px));
+  overflow-wrap: anywhere;
+}
+
+.display-window-placeholder.error {
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 14px),
+    #080d13;
+}
+
 .display-window-label {
   position: relative;
   z-index: 1;

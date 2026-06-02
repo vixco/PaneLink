@@ -5,11 +5,15 @@ use panelink_core::{
 };
 use serde::Serialize;
 use std::{
+    collections::HashMap,
+    io::Cursor,
     io::{Read, Write},
     net::{SocketAddr, TcpStream, ToSocketAddrs},
+    thread,
     time::Duration,
 };
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tiny_http::{Header, Response, Server, StatusCode};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +32,13 @@ struct RemoteFrameResponse {
     status_code: u16,
     content_type: String,
     data_url: Option<String>,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteDisplayResponse {
+    ok: bool,
     message: String,
 }
 
@@ -75,6 +86,20 @@ fn get_frame_server_url() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_frame_server_lan_url() -> Result<String, String> {
+    let port = panelink_capture::start_frame_server()?;
+    let advertisement = panelink_discovery::advertise_payload();
+    let host = host_from_authority(&advertisement.address)
+        .filter(|host| host != "0.0.0.0" && host != "127.0.0.1")
+        .ok_or_else(|| {
+            "Could not determine this device's LAN address for remote display streaming"
+                .to_string()
+        })?;
+
+    Ok(format!("http://{host}:{port}/frame"))
+}
+
+#[tauri::command]
 fn fetch_remote_frame(url: String) -> RemoteFrameResponse {
     match fetch_http_bytes(&url, Duration::from_millis(1200)) {
         Ok(response) => response,
@@ -83,6 +108,53 @@ fn fetch_remote_frame(url: String) -> RemoteFrameResponse {
             status_code: 0,
             content_type: String::new(),
             data_url: None,
+            message: error,
+        },
+    }
+}
+
+#[tauri::command]
+fn open_remote_display_window(
+    receiver_address: String,
+    peer_id: String,
+    peer_address: String,
+    screen_count: Option<u8>,
+    quality: Option<String>,
+) -> RemoteDisplayResponse {
+    let host = match host_from_authority(&receiver_address) {
+        Some(host) => host,
+        None => {
+            return RemoteDisplayResponse {
+                ok: false,
+                message: "Receiver address is missing a LAN host".into(),
+            }
+        }
+    };
+    let url = format!(
+        "http://{}:{}/open-display?peerId={}&peerAddress={}&screens={}&quality={}",
+        host,
+        panelink_discovery::DEFAULT_PORT,
+        percent_encode(&peer_id),
+        percent_encode(&peer_address),
+        screen_count.unwrap_or(1).clamp(1, 3),
+        percent_encode(&quality.unwrap_or_else(|| "Low latency".into()))
+    );
+
+    match fetch_http_text(&url, Duration::from_millis(1600)) {
+        Ok(response) if response.status_code == 200 => RemoteDisplayResponse {
+            ok: true,
+            message: response.body,
+        },
+        Ok(response) => RemoteDisplayResponse {
+            ok: false,
+            message: if response.body.is_empty() {
+                format!("Receiver returned HTTP {}", response.status_code)
+            } else {
+                response.body
+            },
+        },
+        Err(error) => RemoteDisplayResponse {
+            ok: false,
             message: error,
         },
     }
@@ -118,13 +190,36 @@ fn open_display_window(
     peer_address: Option<String>,
     quality: Option<String>,
 ) -> Result<(), String> {
-    let screen_count = screen_count.unwrap_or(1).clamp(1, 3);
+    open_display_window_for_request(
+        app,
+        DisplayWindowOpenRequest {
+            screen_count,
+            peer_id,
+            peer_address,
+            quality,
+        },
+    )
+}
+
+#[derive(Debug, Clone)]
+struct DisplayWindowOpenRequest {
+    screen_count: Option<u8>,
+    peer_id: Option<String>,
+    peer_address: Option<String>,
+    quality: Option<String>,
+}
+
+fn open_display_window_for_request(
+    app: AppHandle,
+    request: DisplayWindowOpenRequest,
+) -> Result<(), String> {
+    let screen_count = request.screen_count.unwrap_or(1).clamp(1, 3);
     let initial_width = if screen_count > 1 { 1440.0 } else { 1280.0 };
     let display_url = format!(
         "/?window=display&peerId={}&peerAddress={}&screens={screen_count}&quality={}",
-        percent_encode(&peer_id.unwrap_or_else(|| "unknown".into())),
-        percent_encode(&peer_address.unwrap_or_default()),
-        percent_encode(&quality.unwrap_or_else(|| "Low latency".into()))
+        percent_encode(&request.peer_id.unwrap_or_else(|| "unknown".into())),
+        percent_encode(&request.peer_address.unwrap_or_default()),
+        percent_encode(&request.quality.unwrap_or_else(|| "Low latency".into()))
     );
 
     if let Some(window) = app.get_webview_window("display") {
@@ -157,6 +252,27 @@ fn percent_encode(value: &str) -> String {
     }
 
     encoded
+}
+
+fn host_from_authority(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if value.starts_with('[') {
+        let end = value.find(']')?;
+        return Some(value[1..end].to_string());
+    }
+
+    Some(
+        value
+            .rsplit_once(':')
+            .filter(|(_, port)| port.chars().all(|char| char.is_ascii_digit()))
+            .map(|(host, _)| host)
+            .unwrap_or(value)
+            .to_string(),
+    )
 }
 
 #[derive(Debug)]
@@ -192,6 +308,39 @@ fn fetch_http_bytes(url: &str, timeout: Duration) -> Result<RemoteFrameResponse,
         .map_err(|error| format!("Could not read remote frame: {error}"))?;
 
     parse_http_response(url, &bytes)
+}
+
+#[derive(Debug)]
+struct HttpTextResponse {
+    status_code: u16,
+    body: String,
+}
+
+fn fetch_http_text(url: &str, timeout: Duration) -> Result<HttpTextResponse, String> {
+    let target = parse_http_url(url)?;
+    let mut stream = connect_to_target(&target, timeout)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| format!("Could not set read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| format!("Could not set write timeout: {error}"))?;
+
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept: text/plain\r\nCache-Control: no-cache\r\n\r\n",
+        target.path, target.authority
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("Could not request receiver display: {error}"))?;
+
+    let mut bytes = Vec::new();
+    stream
+        .take(128 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read receiver display response: {error}"))?;
+
+    parse_http_text_response(&bytes)
 }
 
 fn parse_http_url(url: &str) -> Result<HttpTarget, String> {
@@ -321,6 +470,185 @@ fn parse_http_response(url: &str, bytes: &[u8]) -> Result<RemoteFrameResponse, S
         data_url: None,
         message,
     })
+}
+
+fn parse_http_text_response(bytes: &[u8]) -> Result<HttpTextResponse, String> {
+    let header_end = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "Receiver response did not include HTTP headers".to_string())?;
+    let header_text = String::from_utf8_lossy(&bytes[..header_end]);
+    let body = &bytes[header_end + 4..];
+    let mut lines = header_text.lines();
+    let status_line = lines.next().unwrap_or_default();
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(0);
+
+    Ok(HttpTextResponse {
+        status_code,
+        body: String::from_utf8_lossy(body).trim().to_string(),
+    })
+}
+
+fn start_remote_control_server(app: AppHandle) -> Result<(), String> {
+    let server = Server::http(("0.0.0.0", panelink_discovery::DEFAULT_PORT)).map_err(|error| {
+        format!(
+            "Remote display control server could not bind port {}: {error}",
+            panelink_discovery::DEFAULT_PORT
+        )
+    })?;
+
+    thread::Builder::new()
+        .name("panelink-remote-control".into())
+        .spawn(move || run_remote_control_server(app, server))
+        .map(|_| ())
+        .map_err(|error| format!("Remote display control server could not start: {error}"))
+}
+
+fn run_remote_control_server(app: AppHandle, server: Server) {
+    for request in server.incoming_requests() {
+        let method = request.method().as_str().to_string();
+        let url = request.url().to_string();
+        let path = url.split('?').next().unwrap_or("/");
+        let response = if method == "OPTIONS" {
+            text_control_response("", StatusCode(204))
+        } else if matches!(method.as_str(), "GET" | "POST") && path == "/open-display" {
+            match display_request_from_url(&url) {
+                Ok(display_request) => match open_display_window_for_request(app.clone(), display_request) {
+                    Ok(()) => text_control_response("Display window opened on receiver", StatusCode(200)),
+                    Err(error) => text_control_response(error, StatusCode(500)),
+                },
+                Err(error) => text_control_response(error, StatusCode(400)),
+            }
+        } else if path == "/health" {
+            text_control_response("ok", StatusCode(200))
+        } else {
+            text_control_response("PaneLink remote display control", StatusCode(200))
+        };
+
+        let _ = request.respond(response);
+    }
+}
+
+fn display_request_from_url(url: &str) -> Result<DisplayWindowOpenRequest, String> {
+    let query = url
+        .split_once('?')
+        .map(|(_, query)| query)
+        .ok_or_else(|| "Remote display request is missing query parameters".to_string())?;
+    let values = parse_query(query);
+    let peer_address = values
+        .get("peerAddress")
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .ok_or_else(|| "Remote display request is missing peerAddress".to_string())?;
+    let screen_count = values
+        .get("screens")
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(1)
+        .clamp(1, 3);
+
+    Ok(DisplayWindowOpenRequest {
+        screen_count: Some(screen_count),
+        peer_id: values.get("peerId").cloned(),
+        peer_address: Some(peer_address),
+        quality: values.get("quality").cloned(),
+    })
+}
+
+fn parse_query(query: &str) -> HashMap<String, String> {
+    let mut values = HashMap::new();
+
+    for part in query.split('&').filter(|part| !part.is_empty()) {
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
+        values.insert(percent_decode(key), percent_decode(value));
+    }
+
+    values
+}
+
+fn percent_decode(value: &str) -> String {
+    let mut output = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                output.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
+                    if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                        output.push(byte);
+                        index += 3;
+                        continue;
+                    }
+                }
+                output.push(bytes[index]);
+                index += 1;
+            }
+            byte => {
+                output.push(byte);
+                index += 1;
+            }
+        }
+    }
+
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn text_control_response(text: impl Into<String>, status: StatusCode) -> Response<Cursor<Vec<u8>>> {
+    Response::from_string(text.into())
+        .with_status_code(status)
+        .with_header(header("Content-Type", "text/plain; charset=utf-8"))
+        .with_header(header("Access-Control-Allow-Origin", "*"))
+        .with_header(header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
+        .with_header(header("Access-Control-Allow-Headers", "*"))
+}
+
+fn header(name: &'static str, value: &'static str) -> Header {
+    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("static header should be valid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_from_authority_accepts_peer_endpoints_and_bare_hosts() {
+        assert_eq!(
+            host_from_authority("192.168.1.42:48170").as_deref(),
+            Some("192.168.1.42")
+        );
+        assert_eq!(
+            host_from_authority("[fe80::1]:48170").as_deref(),
+            Some("fe80::1")
+        );
+        assert_eq!(
+            host_from_authority("panelink.local").as_deref(),
+            Some("panelink.local")
+        );
+    }
+
+    #[test]
+    fn display_request_from_url_decodes_remote_display_payload() {
+        let request = display_request_from_url(
+            "/open-display?peerId=mac%201&peerAddress=http%3A%2F%2F192.168.1.24%3A48171%2Fframe&screens=2&quality=Low+latency",
+        )
+        .expect("remote display request should parse");
+
+        assert_eq!(request.peer_id.as_deref(), Some("mac 1"));
+        assert_eq!(
+            request.peer_address.as_deref(),
+            Some("http://192.168.1.24:48171/frame")
+        );
+        assert_eq!(request.screen_count, Some(2));
+        assert_eq!(request.quality.as_deref(), Some("Low latency"));
+    }
 }
 
 #[tauri::command]
@@ -502,9 +830,12 @@ fn run_native_setup() -> NativeSetupState {
 
 fn main() {
     tauri::Builder::default()
-        .setup(|_app| {
+        .setup(|app| {
             if let Err(error) = panelink_capture::start_frame_server() {
                 eprintln!("PaneLink frame server startup failed: {error}");
+            }
+            if let Err(error) = start_remote_control_server(app.handle().clone()) {
+                eprintln!("PaneLink remote control startup failed: {error}");
             }
 
             Ok(())
@@ -517,7 +848,9 @@ fn main() {
             advertise_peer,
             issue_pairing_token,
             get_frame_server_url,
+            get_frame_server_lan_url,
             fetch_remote_frame,
+            open_remote_display_window,
             get_session_snapshot,
             get_transport_state,
             get_stream_state,
