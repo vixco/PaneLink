@@ -12,6 +12,7 @@ pub struct VideoBackendReport {
     pub backend: String,
     pub state: VideoBackendState,
     pub available: bool,
+    pub can_start_source_stream: bool,
     pub transport: String,
     pub codec: String,
     pub hardware_accelerated: bool,
@@ -63,17 +64,16 @@ pub fn backend_report() -> VideoBackendReport {
     if cfg!(target_os = "macos") {
         return VideoBackendReport {
             backend: "ScreenCaptureKit + VideoToolbox".into(),
-            state: VideoBackendState::Available,
-            available: true,
+            state: VideoBackendState::PermissionRequired,
+            available: false,
+            can_start_source_stream: false,
             transport: "WebRTC/RTP over PaneLink LAN signaling".into(),
             codec: "H.264 hardware encode; HEVC for Sharp when available".into(),
             hardware_accelerated: true,
-            message:
-                "Native remote-desktop video backend selected; PNG frame polling is debug-only."
-                    .into(),
+            message: "Native remote-desktop video engine is not installed yet; PaneLink will not start a fake screenshot stream.".into(),
             actions: vec![
-                "Allow Screen Recording for PaneLink".into(),
-                "Allow Accessibility for keyboard and pointer control".into(),
+                "Install the PaneLink native video engine".into(),
+                "Then allow Screen Recording and Accessibility for PaneLink".into(),
             ],
         };
     }
@@ -83,10 +83,12 @@ pub fn backend_report() -> VideoBackendReport {
             backend: "WebRTC hardware receiver".into(),
             state: VideoBackendState::ReceiverOnly,
             available: true,
+            can_start_source_stream: false,
             transport: "WebRTC/RTP over PaneLink LAN signaling".into(),
             codec: "H.264 hardware decode".into(),
             hardware_accelerated: true,
-            message: "Receiver is ready for native PaneLink remote-desktop video sessions.".into(),
+            message: "Receiver is ready, but this device cannot start the source video engine."
+                .into(),
             actions: vec!["Allow PaneLink through Windows Firewall for LAN control".into()],
         };
     }
@@ -95,6 +97,7 @@ pub fn backend_report() -> VideoBackendReport {
         backend: "Unsupported platform".into(),
         state: VideoBackendState::Unsupported,
         available: false,
+        can_start_source_stream: false,
         transport: "unavailable".into(),
         codec: "unavailable".into(),
         hardware_accelerated: false,
@@ -104,6 +107,21 @@ pub fn backend_report() -> VideoBackendReport {
 }
 
 pub fn start_video_session(request: VideoSessionRequest) -> Result<VideoSession, String> {
+    validate_request(&request)?;
+    let backend = backend_report();
+    if !backend.can_start_source_stream {
+        return Err(backend.message);
+    }
+
+    let session = plan_video_session(request)?;
+    *session_slot()
+        .lock()
+        .expect("video session mutex should not be poisoned") = Some(session.clone());
+
+    Ok(session)
+}
+
+pub fn plan_video_session(request: VideoSessionRequest) -> Result<VideoSession, String> {
     validate_request(&request)?;
 
     let quality = normalize_quality(&request.quality);
@@ -135,10 +153,6 @@ pub fn start_video_session(request: VideoSessionRequest) -> Result<VideoSession,
         message: "Native remote-desktop video session negotiated; PNG frame polling disabled."
             .into(),
     };
-
-    *session_slot()
-        .lock()
-        .expect("video session mutex should not be poisoned") = Some(session.clone());
 
     Ok(session)
 }
@@ -250,7 +264,7 @@ mod tests {
 
     #[test]
     fn video_session_contract_is_not_png_polling() {
-        let session = start_video_session(VideoSessionRequest {
+        let session = plan_video_session(VideoSessionRequest {
             source_peer_id: "mac".into(),
             receiver_peer_id: "windows".into(),
             screen_count: 2,
@@ -272,7 +286,7 @@ mod tests {
 
     #[test]
     fn quality_modes_map_to_video_targets() {
-        let low = start_video_session(VideoSessionRequest {
+        let low = plan_video_session(VideoSessionRequest {
             source_peer_id: "mac".into(),
             receiver_peer_id: "windows".into(),
             screen_count: 1,
@@ -283,7 +297,7 @@ mod tests {
             control_address: "http://192.168.1.24:48170".into(),
         })
         .expect("low latency should start");
-        let sharp = start_video_session(VideoSessionRequest {
+        let sharp = plan_video_session(VideoSessionRequest {
             quality: "Sharp".into(),
             ..VideoSessionRequest {
                 source_peer_id: "mac".into(),
@@ -319,5 +333,22 @@ mod tests {
         .expect_err("frame server must not be used for input control");
 
         assert!(error.contains("control server"));
+    }
+
+    #[test]
+    fn start_video_session_does_not_fake_a_missing_source_engine() {
+        let error = start_video_session(VideoSessionRequest {
+            source_peer_id: "mac".into(),
+            receiver_peer_id: "windows".into(),
+            screen_count: 1,
+            quality: "Low latency".into(),
+            width: 1920,
+            height: 1080,
+            refresh_hz: 120,
+            control_address: "http://192.168.1.24:48170".into(),
+        })
+        .expect_err("missing native video engine must not create an active session");
+
+        assert!(error.contains("video engine"));
     }
 }

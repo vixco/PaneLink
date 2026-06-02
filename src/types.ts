@@ -158,6 +158,7 @@ export type VideoBackendReport = {
   backend: string;
   state: 'available' | 'permission-required' | 'receiver-only' | 'unsupported';
   available: boolean;
+  canStartSourceStream: boolean;
   transport: string;
   codec: string;
   hardwareAccelerated: boolean;

@@ -154,7 +154,8 @@ function ControlApp() {
   const screens = session?.screens ?? [];
   const isConnected = session?.status === 'connected' || session?.status === 'degraded';
   const isStreaming = stream?.status === 'streaming' || stream?.status === 'live';
-  const displayPipelineReady = Boolean(data.videoBackend?.available);
+  const displayPipelineReady = Boolean(data.videoBackend?.canStartSourceStream);
+  const videoEngineMissing = isConnected && !displayPipelineReady;
   const receiverReady = isStreaming && displayWindow.attached;
   const selectedPeerTrusted = selectedPeer ? trustedPeerIds.includes(selectedPeer.id) || selectedPeer.trusted : false;
   const localPairingCode = data.capabilities?.peerId ? pairingCodeForPeer(data.capabilities.peerId) : 'laden...';
@@ -166,19 +167,15 @@ function ControlApp() {
       return null;
     }
 
-    const nextStream = await startStream({
-      peerId: peer.id,
-      screenIds: nextSession.screens.map((screen) => screen.id),
-      quality,
-    });
-
     if (!displayPipelineReady) {
       await closeDisplayWindow();
+      const backendMessage = data.videoBackend?.message
+        || 'Native remote-desktop video engine ontbreekt. PaneLink start geen nep-stream meer.';
       const nextSetupStatus = {
         started: false,
         platform: data.capabilities?.platform ?? 'unknown',
-        message: 'Native capture is nog niet beschikbaar. Open native setup handmatig en probeer daarna opnieuw.',
-        actions: ['Native setup openen'],
+        message: backendMessage,
+        actions: data.videoBackend?.actions.length ? data.videoBackend.actions : ['Installeer de PaneLink native video engine'],
         requiresRestart: false,
       };
       setSetupStatus(nextSetupStatus);
@@ -187,8 +184,14 @@ function ControlApp() {
         message: nextSetupStatus.message,
       });
 
-      return nextStream;
+      return null;
     }
+
+    const nextStream = await startStream({
+      peerId: peer.id,
+      screenIds: nextSession.screens.map((screen) => screen.id),
+      quality,
+    });
 
     const nextDisplayWindow = await openDisplayForPeer(peer, nextSession.screens.length);
     setDisplayWindow(nextDisplayWindow);
@@ -584,7 +587,7 @@ function ControlApp() {
               <span className="section-label">Session</span>
               <h2>{isConnected ? selectedPeer?.name ?? 'Verbonden apparaat' : 'Nog niet verbonden'}</h2>
             </div>
-            <strong>{receiverReady ? `${stream?.fps ?? 0} FPS` : isConnected ? 'Receiver nodig' : 'Standby'}</strong>
+            <strong>{receiverReady ? `${stream?.fps ?? 0} FPS` : videoEngineMissing ? 'Engine ontbreekt' : isConnected ? 'Receiver nodig' : 'Standby'}</strong>
           </div>
 
           <div className={receiverReady ? 'preview-frame streaming' : isStreaming ? 'preview-frame receiver-needed' : 'preview-frame'}>
@@ -599,7 +602,15 @@ function ControlApp() {
             <div className="preview-copy">
               <Monitor size={30} />
               <strong>
-                {receiverReady ? 'Receiver window open' : isStreaming ? 'Receiver openen' : isConnected ? 'Stream starten...' : 'Wacht op verbinding'}
+                {receiverReady
+                  ? 'Receiver window open'
+                  : isStreaming
+                    ? 'Receiver openen'
+                    : videoEngineMissing
+                      ? 'Video engine ontbreekt'
+                      : isConnected
+                        ? 'Stream starten...'
+                        : 'Wacht op verbinding'}
               </strong>
               <span>
                 {receiverReady && displayPipelineReady
@@ -607,16 +618,20 @@ function ControlApp() {
                   : receiverReady
                     ? 'Receiver staat open. Echte schermpixels wachten nog op native capture en virtual display driver.'
                     : isStreaming
-                      ? displayWindow.message || setupStatus?.message || 'PaneLink wacht op een geldig frame voordat de receiver wordt geopend.'
+                      ? displayWindow.message || setupStatus?.message || 'PaneLink wacht op de native video engine.'
+                      : videoEngineMissing
+                        ? setupStatus?.message || data.videoBackend?.message || 'Native remote-desktop video engine ontbreekt.'
                       : isConnected
-                        ? 'De stream-engine wordt gestart.'
+                        ? 'Stream wordt gestart.'
                         : 'Klik links op verbinden.'}
               </span>
               <span hidden>
                 {isStreaming
                   ? `${stream?.codec ?? 'H.264'} · frame ${stream?.frameId ?? 0} · ${stream?.latencyMs ?? 0} ms`
-                  : isConnected
-                    ? 'De stream-engine wordt gestart.'
+                  : videoEngineMissing
+                    ? setupStatus?.message || data.videoBackend?.message || 'Native remote-desktop video engine ontbreekt.'
+                    : isConnected
+                      ? 'Stream wordt gestart.'
                     : 'Klik links op verbinden.'}
               </span>
               {isConnected && (

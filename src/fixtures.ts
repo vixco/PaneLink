@@ -90,6 +90,7 @@ export const fallbackVideoBackend: VideoBackendReport = {
   backend: 'Browser preview receiver',
   state: 'receiver-only',
   available: true,
+  canStartSourceStream: false,
   transport: 'WebRTC/RTP preview',
   codec: 'H.264 browser decode',
   hardwareAccelerated: true,
