@@ -267,15 +267,22 @@ export function getFrameServerLanUrl() {
   return call<string>('get_frame_server_lan_url', 'http://127.0.0.1:48171/frame');
 }
 
-export function getDisplayFrameImageUrl(url: string, nonce: number) {
+export function getDisplayFrameImageUrl(url: string, nonce: number, quality: StreamState['quality']) {
   if (!url) return '';
 
+  const frameUrl = withFrameQuality(url, quality);
+
   if (isTauri) {
-    return `http://127.0.0.1:48170/frame-proxy?url=${encodeURIComponent(url)}&t=${nonce}`;
+    return `http://127.0.0.1:48170/frame-proxy?url=${encodeURIComponent(frameUrl)}&t=${nonce}`;
   }
 
+  const separator = frameUrl.includes('?') ? '&' : '?';
+  return `${frameUrl}${separator}panelinkFrame=${nonce}`;
+}
+
+function withFrameQuality(url: string, quality: StreamState['quality']) {
   const separator = url.includes('?') ? '&' : '?';
-  return `${url}${separator}panelinkFrame=${nonce}`;
+  return `${url}${separator}quality=${encodeURIComponent(quality)}`;
 }
 
 export async function fetchRemoteFrame(url: string) {

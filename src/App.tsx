@@ -58,6 +58,11 @@ type AppData = {
 };
 
 const qualities: StreamState['quality'][] = ['Low latency', 'Balanced', 'Sharp'];
+const displayPollIntervals: Record<StreamState['quality'], number> = {
+  'Low latency': 33,
+  Balanced: 66,
+  Sharp: 120,
+};
 const isTauriRuntime = '__TAURI_INTERNALS__' in window;
 const queryIsDisplayWindow = new URLSearchParams(window.location.search).get('window') === 'display';
 
@@ -651,17 +656,17 @@ function DisplayWindow() {
     }
 
     const refreshFrame = () => {
-      setFrameSrc(getDisplayFrameImageUrl(config.peerAddress, Date.now()));
+      setFrameSrc(getDisplayFrameImageUrl(config.peerAddress, Date.now(), config.quality));
     };
 
     setFrameError('');
     refreshFrame();
-    const timer = window.setInterval(refreshFrame, 120);
+    const timer = window.setInterval(refreshFrame, displayPollIntervals[config.quality] ?? 66);
 
     return () => {
       window.clearInterval(timer);
     };
-  }, [config.peerAddress]);
+  }, [config.peerAddress, config.quality]);
 
   useEffect(() => {
     const syncFullscreenState = () => setIsFullscreen(Boolean(document.fullscreenElement));

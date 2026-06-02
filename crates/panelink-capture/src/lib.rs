@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::{
     io::Cursor,
-    sync::{Arc, OnceLock, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, OnceLock, RwLock,
+    },
     thread,
     time::Duration,
 };
@@ -9,6 +12,8 @@ use tiny_http::{Header, Response, Server, StatusCode};
 use xcap::{image::ImageFormat, Monitor};
 
 pub const FRAME_SERVER_PORT: u16 = 48171;
+const DEFAULT_FRAME_INTERVAL_MS: u64 = 66;
+static FRAME_INTERVAL_MS: AtomicU64 = AtomicU64::new(DEFAULT_FRAME_INTERVAL_MS);
 
 #[derive(Debug, Default)]
 struct FrameCache {
@@ -92,7 +97,7 @@ fn start_capture_loop(cache: SharedFrameCache) -> Result<(), String> {
                     state.frame = Some(frame);
                     state.error = None;
                     state.sequence = state.sequence.saturating_add(1);
-                    Duration::from_millis(180)
+                    Duration::from_millis(requested_frame_interval_ms())
                 }
                 Err(error) => {
                     let mut state = cache.write().expect("frame cache should not be poisoned");
@@ -148,18 +153,97 @@ pub fn capture_primary_png() -> Result<Vec<u8>, String> {
 fn run_frame_server(server: Server, cache: SharedFrameCache) {
     for request in server.incoming_requests() {
         let method = request.method().as_str().to_string();
-        let path = request.url().split('?').next().unwrap_or("/");
+        let url = request.url().to_string();
+        let path = url.split('?').next().unwrap_or("/");
         let response = if method == "OPTIONS" {
             empty_response(StatusCode(204))
         } else {
             match path {
-                "/frame" => cached_frame_response(&cache),
+                "/frame" => {
+                    update_requested_frame_interval(&url);
+                    cached_frame_response(&cache)
+                }
                 "/health" => cached_health_response(&cache),
                 _ => text_response("PaneLink frame server", StatusCode(200)),
             }
         };
 
         let _ = request.respond(response);
+    }
+}
+
+fn requested_frame_interval_ms() -> u64 {
+    FRAME_INTERVAL_MS.load(Ordering::Relaxed)
+}
+
+fn update_requested_frame_interval(url: &str) {
+    let quality = url
+        .split_once('?')
+        .and_then(|(_, query)| query_value(query, "quality"))
+        .unwrap_or_default();
+    let interval_ms = frame_interval_for_quality(&quality);
+
+    FRAME_INTERVAL_MS.store(interval_ms, Ordering::Relaxed);
+}
+
+fn frame_interval_for_quality(quality: &str) -> u64 {
+    match quality {
+        "Low latency" => 33,
+        "Sharp" => 120,
+        _ => 66,
+    }
+}
+
+fn query_value(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|part| {
+        let (part_key, value) = part.split_once('=')?;
+        (part_key == key).then(|| percent_decode(value))
+    })
+}
+
+fn percent_decode(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut bytes = value.as_bytes().iter().copied();
+
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'+' => output.push(' '),
+            b'%' => {
+                let Some(high) = bytes.next() else {
+                    output.push('%');
+                    break;
+                };
+                let Some(low) = bytes.next() else {
+                    output.push('%');
+                    output.push(high as char);
+                    break;
+                };
+                match hex_byte(high, low) {
+                    Some(decoded) => output.push(decoded as char),
+                    None => {
+                        output.push('%');
+                        output.push(high as char);
+                        output.push(low as char);
+                    }
+                }
+            }
+            _ => output.push(byte as char),
+        }
+    }
+
+    output
+}
+
+fn hex_byte(high: u8, low: u8) -> Option<u8> {
+    Some(hex_value(high)? * 16 + hex_value(low)?)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -267,5 +351,24 @@ mod tests {
         assert!(!is_permission_related_capture_error(
             "Could not encode captured frame: invalid data"
         ));
+    }
+
+    #[test]
+    fn frame_interval_tracks_quality_modes() {
+        assert_eq!(frame_interval_for_quality("Low latency"), 33);
+        assert_eq!(frame_interval_for_quality("Balanced"), 66);
+        assert_eq!(frame_interval_for_quality("Sharp"), 120);
+    }
+
+    #[test]
+    fn query_value_decodes_quality_names() {
+        assert_eq!(
+            query_value("quality=Low%20latency&x=1", "quality").as_deref(),
+            Some("Low latency")
+        );
+        assert_eq!(
+            query_value("x=1&quality=Sharp", "quality").as_deref(),
+            Some("Sharp")
+        );
     }
 }
