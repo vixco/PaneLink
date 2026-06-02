@@ -23,7 +23,7 @@ Implementation direction:
 Current implementation:
 
 - `panelink-virtual-display` now exposes a typed backend report plus create/destroy requests for the UI and Tauri shell.
-- On macOS, PaneLink detects BetterDisplay or SimpleDisplay as an external helper path and starts the helper instead of silently faking an extended screen.
+- On macOS, PaneLink uses its own native `CGVirtualDisplay` backend instead of BetterDisplay, SimpleDisplay, or another external helper.
 - On non-macOS devices, PaneLink reports that virtual display creation must happen on the Mac source device.
 - The connect/add-screen flow now blocks the "real extra monitor" path when no virtual-display backend is available, so users do not mistake a mirrored frame window for an extended display.
 

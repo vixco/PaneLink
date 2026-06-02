@@ -221,7 +221,7 @@ export function openDisplayWindow(request: DisplayWindowRequest) {
   ).then(() => ({ attached: true, message: 'Display window opened' }));
 }
 
-export function openRemoteDisplayWindow(receiverAddress: string, request: DisplayWindowRequest) {
+export function openRemoteDisplayWindow(receiverAddress: string, request: DisplayWindowRequest, receiverPeerId?: string) {
   if (!isTauri) {
     return openDisplayWindow(request);
   }
@@ -231,6 +231,7 @@ export function openRemoteDisplayWindow(receiverAddress: string, request: Displa
     { ok: false, message: 'Receiver display command failed' },
     {
       receiverAddress,
+      receiverPeerId,
       peerId: request.peerId,
       peerAddress: request.peerAddress,
       screenCount: request.screenCount,

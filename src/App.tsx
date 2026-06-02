@@ -236,7 +236,7 @@ function ControlApp() {
         started: false,
         platform: data.capabilities?.platform ?? 'macos',
         message,
-        actions: backend.actions.length ? backend.actions : ['Installeer een macOS virtual-display helper'],
+        actions: backend.actions.length ? backend.actions : ['Start dit vanaf de Mac die de extra monitor nodig heeft'],
         requiresRestart: false,
       });
       setDisplayWindow({ attached: false, message });
@@ -289,7 +289,7 @@ function ControlApp() {
         };
       }
 
-      return openRemoteDisplayWindow(peer.address, request);
+      return openRemoteDisplayWindow(peer.address, request, peer.id);
     }
 
     return openDisplayWindow(request);

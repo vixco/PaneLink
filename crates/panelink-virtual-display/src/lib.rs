@@ -64,17 +64,19 @@ pub fn create_virtual_display(
         return Err(report.message);
     }
 
-    start_available_backend(&report)?;
+    let id = create_platform_virtual_display(&request, &report)?;
 
     Ok(VirtualDisplaySession {
-        id: Uuid::new_v4().to_string(),
+        id,
         active: true,
         backend: report.backend,
         display_name: request.name,
         width: request.width,
         height: request.height,
         refresh_hz: request.refresh_hz,
-        message: "Virtual display backend started. macOS may still need a moment to publish the new display.".into(),
+        message:
+            "Native virtual display created. macOS may need a moment to publish the new display."
+                .into(),
     })
 }
 
@@ -82,6 +84,8 @@ pub fn destroy_virtual_display(id: String) -> Result<VirtualDisplaySession, Stri
     if id.trim().is_empty() {
         return Err("Virtual display id is missing".into());
     }
+
+    release_platform_virtual_display(&id)?;
 
     Ok(VirtualDisplaySession {
         id,
@@ -91,7 +95,7 @@ pub fn destroy_virtual_display(id: String) -> Result<VirtualDisplaySession, Stri
         width: DEFAULT_WIDTH,
         height: DEFAULT_HEIGHT,
         refresh_hz: DEFAULT_REFRESH_HZ,
-        message: "Virtual display release requested. If an external helper is active, close its PaneLink display from that helper.".into(),
+        message: "Native virtual display released.".into(),
     })
 }
 
@@ -128,46 +132,7 @@ fn normalize_refresh_rate(value: u16) -> u16 {
 fn platform_backend_report() -> VirtualDisplayBackendReport {
     #[cfg(target_os = "macos")]
     {
-        if helper_exists("/Applications/BetterDisplay.app") {
-            return VirtualDisplayBackendReport {
-                backend: "BetterDisplay external helper".into(),
-                state: VirtualDisplayState::Available,
-                available: true,
-                requires_external_tool: true,
-                message:
-                    "BetterDisplay is installed and can provide the real macOS virtual monitor."
-                        .into(),
-                actions: vec![
-                    "Open BetterDisplay".into(),
-                    "Create PaneLink virtual monitor".into(),
-                ],
-            };
-        }
-
-        if helper_exists("/Applications/SimpleDisplay.app") {
-            return VirtualDisplayBackendReport {
-                backend: "SimpleDisplay external helper".into(),
-                state: VirtualDisplayState::Available,
-                available: true,
-                requires_external_tool: true,
-                message:
-                    "SimpleDisplay is installed and can provide the real macOS virtual monitor."
-                        .into(),
-                actions: vec![
-                    "Open SimpleDisplay".into(),
-                    "Create PaneLink virtual monitor".into(),
-                ],
-            };
-        }
-
-        return VirtualDisplayBackendReport {
-            backend: "macOS CGVirtualDisplay backend".into(),
-            state: VirtualDisplayState::DriverRequired,
-            available: false,
-            requires_external_tool: true,
-            message: "A macOS virtual-display helper is required before PaneLink can add a real extended display. Install BetterDisplay or SimpleDisplay, then try again.".into(),
-            actions: vec!["Install BetterDisplay or SimpleDisplay".into()],
-        };
+        return native_macos_backend_report();
     }
 
     #[allow(unreachable_code)]
@@ -181,32 +146,303 @@ fn platform_backend_report() -> VirtualDisplayBackendReport {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn helper_exists(path: &str) -> bool {
-    std::path::Path::new(path).exists()
+#[cfg(any(test, target_os = "macos"))]
+fn native_macos_backend_report() -> VirtualDisplayBackendReport {
+    VirtualDisplayBackendReport {
+        backend: "PaneLink CGVirtualDisplay".into(),
+        state: VirtualDisplayState::Available,
+        available: true,
+        requires_external_tool: false,
+        message:
+            "PaneLink will create a native macOS virtual monitor with CoreGraphics CGVirtualDisplay."
+                .into(),
+        actions: vec!["Create native PaneLink virtual monitor".into()],
+    }
 }
 
-fn start_available_backend(_report: &VirtualDisplayBackendReport) -> Result<(), String> {
+fn create_platform_virtual_display(
+    _request: &VirtualDisplayRequest,
+    _report: &VirtualDisplayBackendReport,
+) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        let app_name = if _report.backend.starts_with("BetterDisplay") {
-            "BetterDisplay"
-        } else if _report.backend.starts_with("SimpleDisplay") {
-            "SimpleDisplay"
-        } else {
-            return Ok(());
-        };
+        return macos::create_virtual_display(_request);
+    }
 
-        return std::process::Command::new("open")
-            .arg("-a")
-            .arg(app_name)
-            .status()
-            .map(|_| ())
-            .map_err(|error| format!("Could not start {app_name}: {error}"));
+    #[allow(unreachable_code)]
+    Ok(Uuid::new_v4().to_string())
+}
+
+fn release_platform_virtual_display(_id: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        return macos::release_virtual_display(_id);
     }
 
     #[allow(unreachable_code)]
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::VirtualDisplayRequest;
+    use std::{
+        collections::HashMap,
+        ffi::{c_char, c_void, CString},
+        sync::{Mutex, OnceLock},
+    };
+    use uuid::Uuid;
+
+    type Id = *mut c_void;
+    type Sel = *mut c_void;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGSize {
+        width: f64,
+        height: f64,
+    }
+
+    struct NativeDisplay {
+        display: usize,
+    }
+
+    #[link(name = "Foundation", kind = "framework")]
+    extern "C" {}
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {}
+
+    #[link(name = "objc")]
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> Id;
+        fn sel_registerName(name: *const c_char) -> Sel;
+        fn objc_msgSend();
+    }
+
+    extern "C" {
+        fn dispatch_get_global_queue(identifier: isize, flags: usize) -> Id;
+    }
+
+    pub fn create_virtual_display(request: &VirtualDisplayRequest) -> Result<String, String> {
+        let display = unsafe { create_native_display(request)? };
+        let id = Uuid::new_v4().to_string();
+
+        displays()
+            .lock()
+            .map_err(|_| "Virtual display registry is unavailable".to_string())?
+            .insert(
+                id.clone(),
+                NativeDisplay {
+                    display: display as usize,
+                },
+            );
+
+        Ok(id)
+    }
+
+    pub fn release_virtual_display(id: &str) -> Result<(), String> {
+        let display = displays()
+            .lock()
+            .map_err(|_| "Virtual display registry is unavailable".to_string())?
+            .remove(id);
+
+        if let Some(display) = display {
+            unsafe {
+                msg_send_void(display.display as Id, "release");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn displays() -> &'static Mutex<HashMap<String, NativeDisplay>> {
+        static DISPLAYS: OnceLock<Mutex<HashMap<String, NativeDisplay>>> = OnceLock::new();
+        DISPLAYS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    unsafe fn create_native_display(request: &VirtualDisplayRequest) -> Result<Id, String> {
+        let descriptor_class = class("CGVirtualDisplayDescriptor")?;
+        let display_class = class("CGVirtualDisplay")?;
+        let settings_class = class("CGVirtualDisplaySettings")?;
+        let mode_class = class("CGVirtualDisplayMode")?;
+
+        let descriptor = msg_send_id(msg_send_id(descriptor_class, "alloc"), "init");
+        let settings = msg_send_id(msg_send_id(settings_class, "alloc"), "init");
+        let queue = dispatch_get_global_queue(2, 0);
+        let name = ns_string(&request.name)?;
+        let ppi = 110.0;
+        let width = request.width;
+        let height = request.height;
+
+        msg_send_void_id(descriptor, "setQueue:", queue);
+        msg_send_void_id(descriptor, "setName:", name);
+        msg_send_void_u32(descriptor, "setVendorID:", 0x504c);
+        msg_send_void_u32(descriptor, "setProductID:", 0x1001);
+        msg_send_void_u32(descriptor, "setSerialNum:", 1);
+        msg_send_void_u32(descriptor, "setMaxPixelsWide:", width);
+        msg_send_void_u32(descriptor, "setMaxPixelsHigh:", height);
+        msg_send_void_cgsize(
+            descriptor,
+            "setSizeInMillimeters:",
+            CGSize {
+                width: 25.4 * f64::from(width) / ppi,
+                height: 25.4 * f64::from(height) / ppi,
+            },
+        );
+        msg_send_void_cgpoint(
+            descriptor,
+            "setWhitePoint:",
+            CGPoint {
+                x: 0.3125,
+                y: 0.3291,
+            },
+        );
+        msg_send_void_cgpoint(
+            descriptor,
+            "setRedPrimary:",
+            CGPoint {
+                x: 0.6797,
+                y: 0.3203,
+            },
+        );
+        msg_send_void_cgpoint(
+            descriptor,
+            "setGreenPrimary:",
+            CGPoint {
+                x: 0.2559,
+                y: 0.6983,
+            },
+        );
+        msg_send_void_cgpoint(
+            descriptor,
+            "setBluePrimary:",
+            CGPoint {
+                x: 0.1494,
+                y: 0.0557,
+            },
+        );
+
+        let display = msg_send_id_id(
+            msg_send_id(display_class, "alloc"),
+            "initWithDescriptor:",
+            descriptor,
+        );
+
+        if display.is_null() {
+            return Err("CGVirtualDisplay could not initialize a native display".into());
+        }
+
+        let mode = msg_send_id_u32_u32_f64(
+            msg_send_id(mode_class, "alloc"),
+            "initWithWidth:height:refreshRate:",
+            width,
+            height,
+            f64::from(request.refresh_hz),
+        );
+        let modes = ns_array_with_object(mode)?;
+
+        msg_send_void_u32(settings, "setHiDPI:", 0);
+        msg_send_void_id(settings, "setModes:", modes);
+
+        if !msg_send_bool_id(display, "applySettings:", settings) {
+            msg_send_void(display, "release");
+            return Err("CGVirtualDisplay rejected the requested display mode".into());
+        }
+
+        Ok(display)
+    }
+
+    unsafe fn class(name: &str) -> Result<Id, String> {
+        let name = CString::new(name).map_err(|error| error.to_string())?;
+        let class = objc_getClass(name.as_ptr());
+        if class.is_null() {
+            Err(format!(
+                "Objective-C class {} is not available",
+                name.to_string_lossy()
+            ))
+        } else {
+            Ok(class)
+        }
+    }
+
+    unsafe fn sel(name: &str) -> Sel {
+        let name = CString::new(name).expect("selector names are static and contain no nul bytes");
+        sel_registerName(name.as_ptr())
+    }
+
+    unsafe fn ns_string(value: &str) -> Result<Id, String> {
+        let class = class("NSString")?;
+        let value = CString::new(value).map_err(|error| error.to_string())?;
+        let send: extern "C" fn(Id, Sel, *const c_char) -> Id =
+            std::mem::transmute(objc_msgSend as *const ());
+        Ok(send(class, sel("stringWithUTF8String:"), value.as_ptr()))
+    }
+
+    unsafe fn ns_array_with_object(value: Id) -> Result<Id, String> {
+        let class = class("NSArray")?;
+        let send: extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
+        Ok(send(class, sel("arrayWithObject:"), value))
+    }
+
+    unsafe fn msg_send_id(receiver: Id, selector: &str) -> Id {
+        let send: extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc_msgSend as *const ());
+        send(receiver, sel(selector))
+    }
+
+    unsafe fn msg_send_id_id(receiver: Id, selector: &str, value: Id) -> Id {
+        let send: extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
+        send(receiver, sel(selector), value)
+    }
+
+    unsafe fn msg_send_id_u32_u32_f64(
+        receiver: Id,
+        selector: &str,
+        width: u32,
+        height: u32,
+        refresh_hz: f64,
+    ) -> Id {
+        let send: extern "C" fn(Id, Sel, u32, u32, f64) -> Id =
+            std::mem::transmute(objc_msgSend as *const ());
+        send(receiver, sel(selector), width, height, refresh_hz)
+    }
+
+    unsafe fn msg_send_bool_id(receiver: Id, selector: &str, value: Id) -> bool {
+        let send: extern "C" fn(Id, Sel, Id) -> i8 = std::mem::transmute(objc_msgSend as *const ());
+        send(receiver, sel(selector), value) != 0
+    }
+
+    unsafe fn msg_send_void(receiver: Id, selector: &str) {
+        let send: extern "C" fn(Id, Sel) = std::mem::transmute(objc_msgSend as *const ());
+        send(receiver, sel(selector));
+    }
+
+    unsafe fn msg_send_void_id(receiver: Id, selector: &str, value: Id) {
+        let send: extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc_msgSend as *const ());
+        send(receiver, sel(selector), value);
+    }
+
+    unsafe fn msg_send_void_u32(receiver: Id, selector: &str, value: u32) {
+        let send: extern "C" fn(Id, Sel, u32) = std::mem::transmute(objc_msgSend as *const ());
+        send(receiver, sel(selector), value);
+    }
+
+    unsafe fn msg_send_void_cgpoint(receiver: Id, selector: &str, value: CGPoint) {
+        let send: extern "C" fn(Id, Sel, CGPoint) = std::mem::transmute(objc_msgSend as *const ());
+        send(receiver, sel(selector), value);
+    }
+
+    unsafe fn msg_send_void_cgsize(receiver: Id, selector: &str, value: CGSize) {
+        let send: extern "C" fn(Id, Sel, CGSize) = std::mem::transmute(objc_msgSend as *const ());
+        send(receiver, sel(selector), value);
+    }
 }
 
 #[cfg(test)]
@@ -256,5 +492,18 @@ mod tests {
         assert_eq!(normalized.width, 8192);
         assert_eq!(normalized.height, 480);
         assert_eq!(normalized.refresh_hz, 60);
+    }
+
+    #[test]
+    fn macos_backend_contract_is_native_not_external_helper() {
+        let report = native_macos_backend_report();
+
+        assert_eq!(report.state, VirtualDisplayState::Available);
+        assert!(report.available);
+        assert!(!report.requires_external_tool);
+        assert!(!report.backend.contains("BetterDisplay"));
+        assert!(!report.backend.contains("SimpleDisplay"));
+        assert!(!report.message.contains("BetterDisplay"));
+        assert!(!report.message.contains("SimpleDisplay"));
     }
 }

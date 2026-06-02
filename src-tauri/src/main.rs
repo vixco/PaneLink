@@ -123,48 +123,94 @@ fn fetch_remote_frame(url: String) -> RemoteFrameResponse {
 #[tauri::command]
 fn open_remote_display_window(
     receiver_address: String,
+    receiver_peer_id: Option<String>,
     peer_id: String,
     peer_address: String,
     screen_count: Option<u8>,
     quality: Option<String>,
 ) -> RemoteDisplayResponse {
-    let host = match host_from_authority(&receiver_address) {
-        Some(host) => host,
-        None => {
-            return RemoteDisplayResponse {
-                ok: false,
-                message: "Receiver address is missing a LAN host".into(),
+    let mut attempted_addresses = Vec::new();
+    match request_receiver_display(
+        &receiver_address,
+        &peer_id,
+        &peer_address,
+        screen_count,
+        quality.as_deref(),
+    ) {
+        Ok(response) => return response,
+        Err(error) => attempted_addresses.push(format!("{receiver_address}: {error}")),
+    }
+
+    if let Some(receiver_peer_id) = receiver_peer_id {
+        if let Some(refreshed_address) =
+            refreshed_receiver_address(&receiver_peer_id, &receiver_address)
+        {
+            match request_receiver_display(
+                &refreshed_address,
+                &peer_id,
+                &peer_address,
+                screen_count,
+                quality.as_deref(),
+            ) {
+                Ok(response) => return response,
+                Err(error) => attempted_addresses.push(format!("{refreshed_address}: {error}")),
             }
         }
-    };
+    }
+
+    RemoteDisplayResponse {
+        ok: false,
+        message: format!(
+            "Receiver is niet bereikbaar via LAN. Geprobeerd: {}. Controleer dat beide apparaten op hetzelfde netwerk zitten, VPN uit staat voor LAN, en Windows Firewall PaneLink poort {} toestaat.",
+            attempted_addresses.join(" | "),
+            panelink_discovery::DEFAULT_PORT
+        ),
+    }
+}
+
+fn request_receiver_display(
+    receiver_address: &str,
+    peer_id: &str,
+    peer_address: &str,
+    screen_count: Option<u8>,
+    quality: Option<&str>,
+) -> Result<RemoteDisplayResponse, String> {
+    let host = host_from_authority(receiver_address)
+        .ok_or_else(|| "Receiver address is missing a LAN host".to_string())?;
     let url = format!(
         "http://{}:{}/open-display?peerId={}&peerAddress={}&screens={}&quality={}",
         host,
         panelink_discovery::DEFAULT_PORT,
-        percent_encode(&peer_id),
-        percent_encode(&peer_address),
+        percent_encode(peer_id),
+        percent_encode(peer_address),
         screen_count.unwrap_or(1).clamp(1, 3),
-        percent_encode(&quality.unwrap_or_else(|| "Low latency".into()))
+        percent_encode(quality.unwrap_or("Low latency"))
     );
 
     match fetch_http_text(&url, Duration::from_millis(1600)) {
-        Ok(response) if response.status_code == 200 => RemoteDisplayResponse {
+        Ok(response) if response.status_code == 200 => Ok(RemoteDisplayResponse {
             ok: true,
             message: response.body,
-        },
-        Ok(response) => RemoteDisplayResponse {
+        }),
+        Ok(response) => Ok(RemoteDisplayResponse {
             ok: false,
             message: if response.body.is_empty() {
                 format!("Receiver returned HTTP {}", response.status_code)
             } else {
                 response.body
             },
-        },
-        Err(error) => RemoteDisplayResponse {
-            ok: false,
-            message: error,
-        },
+        }),
+        Err(error) => Err(error),
     }
+}
+
+fn refreshed_receiver_address(receiver_peer_id: &str, original_address: &str) -> Option<String> {
+    panelink_discovery::scan_lan_peers(Duration::from_millis(900))
+        .ok()?
+        .into_iter()
+        .find(|peer| peer.id == receiver_peer_id)
+        .map(|peer| peer.address)
+        .filter(|address| address != original_address)
 }
 
 #[tauri::command]
