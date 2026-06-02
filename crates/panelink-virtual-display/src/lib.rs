@@ -9,6 +9,15 @@ const MIN_HEIGHT: u32 = 480;
 const MAX_WIDTH: u32 = 8192;
 const MAX_HEIGHT: u32 = 8192;
 
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DisplayRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VirtualDisplayState {
@@ -129,6 +138,11 @@ fn normalize_refresh_rate(value: u16) -> u16 {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
+fn origin_right_of_rect(rect: DisplayRect) -> (i32, i32) {
+    ((rect.x + rect.width).round() as i32, rect.y.round() as i32)
+}
+
 fn platform_backend_report() -> VirtualDisplayBackendReport {
     #[cfg(target_os = "macos")]
     {
@@ -210,8 +224,16 @@ mod macos {
         height: f64,
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGRect {
+        origin: CGPoint,
+        size: CGSize,
+    }
+
     struct NativeDisplay {
         display: usize,
+        display_id: u32,
     }
 
     #[link(name = "Foundation", kind = "framework")]
@@ -231,9 +253,23 @@ mod macos {
         fn dispatch_get_global_queue(identifier: isize, flags: usize) -> Id;
     }
 
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayBounds(display: u32) -> CGRect;
+        fn CGBeginDisplayConfiguration(config: *mut *mut c_void) -> i32;
+        fn CGConfigureDisplayOrigin(config: *mut c_void, display: u32, x: i32, y: i32) -> i32;
+        fn CGCompleteDisplayConfiguration(config: *mut c_void, option: u32) -> i32;
+        fn CGCancelDisplayConfiguration(config: *mut c_void) -> i32;
+    }
+
     pub fn create_virtual_display(request: &VirtualDisplayRequest) -> Result<String, String> {
-        let display = unsafe { create_native_display(request)? };
+        let (display, display_id) = unsafe { create_native_display(request)? };
         let id = Uuid::new_v4().to_string();
+
+        unsafe {
+            arrange_display_right_of_main(display_id)?;
+        }
 
         displays()
             .lock()
@@ -242,6 +278,7 @@ mod macos {
                 id.clone(),
                 NativeDisplay {
                     display: display as usize,
+                    display_id,
                 },
             );
 
@@ -255,6 +292,7 @@ mod macos {
             .remove(id);
 
         if let Some(display) = display {
+            let _ = unsafe { restore_display_origin(display.display_id) };
             unsafe {
                 msg_send_void(display.display as Id, "release");
             }
@@ -268,7 +306,7 @@ mod macos {
         DISPLAYS.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
-    unsafe fn create_native_display(request: &VirtualDisplayRequest) -> Result<Id, String> {
+    unsafe fn create_native_display(request: &VirtualDisplayRequest) -> Result<(Id, u32), String> {
         let descriptor_class = class("CGVirtualDisplayDescriptor")?;
         let display_class = class("CGVirtualDisplay")?;
         let settings_class = class("CGVirtualDisplaySettings")?;
@@ -357,7 +395,60 @@ mod macos {
             return Err("CGVirtualDisplay rejected the requested display mode".into());
         }
 
-        Ok(display)
+        let display_id = msg_send_u32(display, "displayID");
+        if display_id == 0 {
+            msg_send_void(display, "release");
+            return Err("CGVirtualDisplay did not publish a display id".into());
+        }
+
+        Ok((display, display_id))
+    }
+
+    unsafe fn arrange_display_right_of_main(display_id: u32) -> Result<(), String> {
+        let main_bounds = CGDisplayBounds(CGMainDisplayID());
+        let (x, y) = origin_right_of_rect(display_rect_from_cgrect(main_bounds));
+        configure_display_origin(display_id, x, y)
+    }
+
+    unsafe fn restore_display_origin(display_id: u32) -> Result<(), String> {
+        configure_display_origin(display_id, 0, 0)
+    }
+
+    unsafe fn configure_display_origin(display_id: u32, x: i32, y: i32) -> Result<(), String> {
+        let mut config = std::ptr::null_mut();
+        let begin_error = CGBeginDisplayConfiguration(&mut config);
+        if begin_error != 0 || config.is_null() {
+            return Err(format!(
+                "Could not begin macOS display configuration: {begin_error}"
+            ));
+        }
+
+        let origin_error = CGConfigureDisplayOrigin(config, display_id, x, y);
+        if origin_error != 0 {
+            let _ = CGCancelDisplayConfiguration(config);
+            return Err(format!(
+                "Could not arrange PaneLink display in macOS layout: {origin_error}"
+            ));
+        }
+
+        let complete_error = CGCompleteDisplayConfiguration(config, 1);
+        if complete_error != 0 {
+            let _ = CGCancelDisplayConfiguration(config);
+            return Err(format!(
+                "Could not apply macOS display arrangement: {complete_error}"
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn display_rect_from_cgrect(rect: CGRect) -> super::DisplayRect {
+        super::DisplayRect {
+            x: rect.origin.x,
+            y: rect.origin.y,
+            width: rect.size.width,
+            height: rect.size.height,
+        }
     }
 
     unsafe fn class(name: &str) -> Result<Id, String> {
@@ -417,6 +508,11 @@ mod macos {
     unsafe fn msg_send_bool_id(receiver: Id, selector: &str, value: Id) -> bool {
         let send: extern "C" fn(Id, Sel, Id) -> i8 = std::mem::transmute(objc_msgSend as *const ());
         send(receiver, sel(selector), value) != 0
+    }
+
+    unsafe fn msg_send_u32(receiver: Id, selector: &str) -> u32 {
+        let send: extern "C" fn(Id, Sel) -> u32 = std::mem::transmute(objc_msgSend as *const ());
+        send(receiver, sel(selector))
     }
 
     unsafe fn msg_send_void(receiver: Id, selector: &str) {
@@ -505,5 +601,17 @@ mod tests {
         assert!(!report.backend.contains("SimpleDisplay"));
         assert!(!report.message.contains("BetterDisplay"));
         assert!(!report.message.contains("SimpleDisplay"));
+    }
+
+    #[test]
+    fn virtual_display_origin_is_right_of_main_display() {
+        let rect = DisplayRect {
+            x: 0.0,
+            y: -120.0,
+            width: 1512.0,
+            height: 982.0,
+        };
+
+        assert_eq!(origin_right_of_rect(rect), (1512, -120));
     }
 }

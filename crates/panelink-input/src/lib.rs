@@ -112,6 +112,17 @@ pub struct InputBatching {
 
 pub const MAX_EVENTS_PER_BATCH: usize = 128;
 
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PointerDisplay {
+    id: u32,
+    primary: bool,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
 pub fn current_input_backend() -> InputBackend {
     backend_report().backend
 }
@@ -287,9 +298,39 @@ fn macos_key_code_for_physical(physical: &str) -> Option<u16> {
     })
 }
 
+#[cfg(any(test, target_os = "macos"))]
+fn pointer_target_display(displays: &[PointerDisplay]) -> Option<PointerDisplay> {
+    displays
+        .iter()
+        .copied()
+        .filter(|display| !display.primary)
+        .max_by(|left, right| {
+            left.x
+                .partial_cmp(&right.x)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    left.width
+                        .partial_cmp(&right.width)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        })
+        .or_else(|| displays.first().copied())
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn normalized_point_on_display(display: PointerDisplay, x: f64, y: f64) -> (f64, f64) {
+    (
+        display.x + x.clamp(0.0, 1.0) * display.width.max(1.0),
+        display.y + y.clamp(0.0, 1.0) * display.height.max(1.0),
+    )
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{macos_key_code_for_physical, InputEvent, PointerButton};
+    use super::{
+        macos_key_code_for_physical, normalized_point_on_display, pointer_target_display,
+        InputEvent, PointerButton, PointerDisplay,
+    };
     use std::{
         ffi::c_void,
         sync::{Mutex, OnceLock},
@@ -319,11 +360,29 @@ mod macos {
         y: f64,
     }
 
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy)]
+    struct CGSize {
+        width: f64,
+        height: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy)]
+    struct CGRect {
+        origin: CGPoint,
+        size: CGSize,
+    }
+
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGMainDisplayID() -> CGDirectDisplayID;
-        fn CGDisplayPixelsWide(display: CGDirectDisplayID) -> usize;
-        fn CGDisplayPixelsHigh(display: CGDirectDisplayID) -> usize;
+        fn CGDisplayBounds(display: CGDirectDisplayID) -> CGRect;
+        fn CGGetActiveDisplayList(
+            max_displays: u32,
+            active_displays: *mut CGDirectDisplayID,
+            display_count: *mut u32,
+        ) -> i32;
         fn CGEventCreateMouseEvent(
             source: *const c_void,
             mouse_type: u32,
@@ -382,19 +441,48 @@ mod macos {
     }
 
     fn point(x: f64, y: f64) -> CGPoint {
-        let display = unsafe { CGMainDisplayID() };
-        let width = unsafe { CGDisplayPixelsWide(display) }.max(1) as f64;
-        let height = unsafe { CGDisplayPixelsHigh(display) }.max(1) as f64;
-        let point = CGPoint {
-            x: x.clamp(0.0, 1.0) * width,
-            y: y.clamp(0.0, 1.0) * height,
-        };
+        let display = pointer_target_display(&active_displays()).unwrap_or(PointerDisplay {
+            id: 0,
+            primary: true,
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        });
+        let (x, y) = normalized_point_on_display(display, x, y);
+        let point = CGPoint { x, y };
 
         *last_point_state()
             .lock()
             .expect("last pointer state should not be poisoned") = point;
 
         point
+    }
+
+    fn active_displays() -> Vec<PointerDisplay> {
+        let mut ids = [0_u32; 16];
+        let mut count = 0_u32;
+        let result =
+            unsafe { CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut count) };
+        if result != 0 {
+            return Vec::new();
+        }
+
+        let primary = unsafe { CGMainDisplayID() };
+        ids.into_iter()
+            .take(count as usize)
+            .map(|id| {
+                let bounds = unsafe { CGDisplayBounds(id) };
+                PointerDisplay {
+                    id,
+                    primary: id == primary,
+                    x: bounds.origin.x,
+                    y: bounds.origin.y,
+                    width: bounds.size.width,
+                    height: bounds.size.height,
+                }
+            })
+            .collect()
     }
 
     fn last_point() -> CGPoint {
@@ -525,5 +613,33 @@ mod tests {
         assert_eq!(macos_key_code_for_physical("Space"), Some(49));
         assert_eq!(macos_key_code_for_physical("ArrowRight"), Some(124));
         assert_eq!(macos_key_code_for_physical("UnknownKey"), None);
+    }
+
+    #[test]
+    fn pointer_input_targets_extended_display_to_the_right() {
+        let displays = [
+            PointerDisplay {
+                id: 1,
+                primary: true,
+                x: 0.0,
+                y: 0.0,
+                width: 1512.0,
+                height: 982.0,
+            },
+            PointerDisplay {
+                id: 2,
+                primary: false,
+                x: 1512.0,
+                y: 0.0,
+                width: 1920.0,
+                height: 1080.0,
+            },
+        ];
+
+        let target = pointer_target_display(&displays).expect("display should be selected");
+        let point = normalized_point_on_display(target, 0.5, 0.5);
+
+        assert_eq!(target.id, 2);
+        assert_eq!(point, (2472.0, 540.0));
     }
 }
