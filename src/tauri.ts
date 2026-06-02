@@ -328,10 +328,12 @@ function withFrameQuality(url: string, quality: StreamState['quality']) {
   return `${url}${separator}quality=${encodeURIComponent(quality)}`;
 }
 
-export async function fetchRemoteFrame(url: string) {
+export async function fetchRemoteFrame(url: string, quality?: StreamState['quality']) {
+  const frameUrl = quality ? withFrameQuality(url, quality) : url;
+
   if (!isTauri) {
     try {
-      const response = await fetch(url, { cache: 'no-store' });
+      const response = await fetch(frameUrl, { cache: 'no-store' });
       if (!response.ok) {
         return {
           ok: false,
@@ -355,7 +357,7 @@ export async function fetchRemoteFrame(url: string) {
         statusCode: response.status,
         contentType: blob.type || response.headers.get('content-type') || 'image/png',
         dataUrl,
-        message: `Frame loaded from ${url}`,
+        message: `Frame loaded from ${frameUrl}`,
       } satisfies RemoteFrameResponse;
     } catch (error) {
       return {
@@ -377,7 +379,7 @@ export async function fetchRemoteFrame(url: string) {
       dataUrl: null,
       message: 'Remote frame command failed',
     },
-    { url },
+    { url: frameUrl },
   );
 }
 

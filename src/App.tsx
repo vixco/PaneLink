@@ -21,7 +21,6 @@ import {
   destroyVirtualDisplay,
   fetchRemoteFrame,
   getCapabilities,
-  getDisplayFrameImageUrl,
   getFrameServerLanUrl,
   getPermissions,
   getSession,
@@ -749,8 +748,11 @@ function DisplayWindow() {
   const [frameSrc, setFrameSrc] = useState('');
   const [lastFrameAt, setLastFrameAt] = useState('');
   const [frameError, setFrameError] = useState('');
+  const [controlError, setControlError] = useState('');
   const [isFullscreen, setIsFullscreen] = useState(false);
   const diagnosticInFlight = useRef(false);
+  const frameInFlight = useRef(false);
+  const hasFrameRef = useRef(false);
   const inputSequence = useRef(0);
   const screenCount = Math.max(1, Math.min(Number(config.screenCount || 1), 3));
   const screens = Array.from({ length: screenCount }, (_, index) => index + 1);
@@ -770,16 +772,34 @@ function DisplayWindow() {
   useEffect(() => {
     if (!config.peerAddress) {
       setFrameSrc('');
+      hasFrameRef.current = false;
       setFrameError('Geen frame URL ontvangen');
       return;
     }
 
-    const refreshFrame = () => {
-      setFrameSrc(getDisplayFrameImageUrl(config.peerAddress, Date.now(), config.quality));
+    setFrameSrc('');
+    hasFrameRef.current = false;
+    const refreshFrame = async () => {
+      if (frameInFlight.current) return;
+
+      frameInFlight.current = true;
+      try {
+        const frame = await fetchRemoteFrame(config.peerAddress, config.quality);
+        if (frame.ok && frame.dataUrl) {
+          hasFrameRef.current = true;
+          setFrameSrc(frame.dataUrl);
+          setFrameError('');
+          setLastFrameAt(new Date().toLocaleTimeString());
+        } else if (!hasFrameRef.current) {
+          setFrameError(frame.message || `HTTP ${frame.statusCode}`);
+        }
+      } finally {
+        frameInFlight.current = false;
+      }
     };
 
     setFrameError('');
-    refreshFrame();
+    void refreshFrame();
     const timer = window.setInterval(refreshFrame, displayPollIntervals[config.quality] ?? 66);
 
     return () => {
@@ -818,7 +838,7 @@ function DisplayWindow() {
 
     diagnosticInFlight.current = true;
     try {
-      const frame = await fetchRemoteFrame(config.peerAddress);
+      const frame = await fetchRemoteFrame(config.peerAddress, config.quality);
       setFrameError(frame.message || `HTTP ${frame.statusCode}`);
     } finally {
       diagnosticInFlight.current = false;
@@ -833,6 +853,7 @@ function DisplayWindow() {
         const nextFullscreen = !(await window.isFullscreen());
         await window.setFullscreen(nextFullscreen);
         setIsFullscreen(nextFullscreen);
+        setControlError('');
         return;
       }
 
@@ -841,8 +862,9 @@ function DisplayWindow() {
       } else {
         await document.documentElement.requestFullscreen();
       }
+      setControlError('');
     } catch (error) {
-      setFrameError(error instanceof Error ? error.message : String(error));
+      setControlError(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -864,7 +886,7 @@ function DisplayWindow() {
       body: JSON.stringify(batch),
       cache: 'no-store',
     }).catch((error) => {
-      setFrameError(error instanceof Error ? error.message : String(error));
+      setControlError(error instanceof Error ? error.message : String(error));
     });
   }
 
@@ -942,7 +964,7 @@ function DisplayWindow() {
           <Monitor size={34} />
           <strong>{frameError ? 'Frame nog niet bereikbaar' : lastFrameAt ? `Live frame ${lastFrameAt}` : 'Wachten op eerste frame'}</strong>
           <span>{config.peerId} - {config.quality}</span>
-          <small>{frameError || config.peerAddress || 'Geen frame URL ontvangen'}</small>
+          <small>{frameError || controlError || config.peerAddress || 'Geen frame URL ontvangen'}</small>
         </div>
       )}
     </main>

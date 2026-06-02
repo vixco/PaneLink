@@ -3,5 +3,11 @@
   "identifier": "default",
   "description": "Default desktop capability for PaneLink",
   "windows": ["main", "display"],
-  "permissions": ["core:default", "updater:default", "process:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-set-fullscreen",
+    "updater:default",
+    "process:default"
+  ]
 }
