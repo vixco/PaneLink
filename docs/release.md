@@ -11,7 +11,10 @@ PaneLink uses GitHub Releases plus the Tauri updater.
 
 ## Maintainer flow
 
-Create a version tag:
+For normal releases, bump `src-tauri/tauri.conf.json` to the next version and push to `main`.
+After CI succeeds, the release workflow automatically publishes `v<version>` if that tag does not already exist.
+
+You can still create a version tag manually:
 
 ```bash
 git tag v0.1.0
