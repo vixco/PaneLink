@@ -20,11 +20,13 @@ pub struct TransportPlan {
 
 pub fn default_transport_plan() -> TransportPlan {
     TransportPlan {
-        primary: "In-process LAN session over typed Rust state".into(),
-        control_channel: "Reliable command model stubbed behind SessionManager".into(),
-        video_channel: "Encoded frame channel planned; metrics are typed now".into(),
-        audio_channel: "Audio channel planned; jitter metrics are typed now".into(),
-        fallback: "WebRTC for future NAT traversal".into(),
+        primary: "Native LAN remote-desktop session".into(),
+        control_channel: "Reliable PaneLink control server for display, input, and signaling"
+            .into(),
+        video_channel: "ScreenCaptureKit + VideoToolbox source encoded into WebRTC/RTP video"
+            .into(),
+        audio_channel: "Low-jitter audio channel planned beside WebRTC/RTP video".into(),
+        fallback: "Debug PNG frame server only; never the product display path".into(),
     }
 }
 
@@ -132,7 +134,7 @@ impl Default for StreamState {
             active_peer_id: None,
             screen_ids: Vec::new(),
             screen_count: 0,
-            codec: "H.264 low latency".into(),
+            codec: "H.264 VideoToolbox".into(),
             transport: TransportMode::LanQuic,
             quality: "Low latency".into(),
             width: 0,
@@ -251,7 +253,7 @@ impl SessionManager {
                 frames_sent: 0,
                 dropped_frames: 0,
                 last_frame: None,
-                message: "Connected; stream ready".into(),
+                message: "Connected; remote-desktop video ready".into(),
                 ..StreamState::default()
             },
         };
@@ -332,7 +334,7 @@ impl SessionManager {
             updated_at_unix_ms: now_unix_ms(),
             error: None,
             last_frame: first_screen.map(|screen| frame_for_screen(1, screen)),
-            message: "Stream live".into(),
+            message: "Remote-desktop video session live".into(),
             ..StreamState::default()
         };
 
@@ -551,8 +553,8 @@ fn session_snapshot(state: &SessionState) -> SessionSnapshot {
         latency_ms: metrics.last_latency_ms,
         bitrate_mbps: metrics.bitrate_mbps,
         packet_loss: metrics.packet_loss,
-        encoder: "H.264 low latency".into(),
-        transport: TransportMode::LanQuic,
+        encoder: "H.264 VideoToolbox".into(),
+        transport: TransportMode::WebRtc,
         audio_output: "System Default Output".into(),
         mic_input: "System Default Microphone".into(),
     }
@@ -636,7 +638,7 @@ fn target_fps_for_quality(quality: &str) -> u16 {
 fn codec_for_quality(quality: &str) -> &'static str {
     match quality {
         "Sharp" => "HEVC quality path",
-        _ => "H.264 low latency",
+        _ => "H.264 VideoToolbox",
     }
 }
 
@@ -735,6 +737,18 @@ mod tests {
         let stopped = manager.stop_stream();
         assert_eq!(stopped.status, StreamStatus::Idle);
         assert_eq!(manager.state().metrics.fps, 0);
+    }
+
+    #[test]
+    fn transport_plan_uses_remote_desktop_video_instead_of_png_frames() {
+        let plan = default_transport_plan();
+
+        assert!(plan
+            .video_channel
+            .contains("ScreenCaptureKit + VideoToolbox"));
+        assert!(plan.video_channel.contains("WebRTC/RTP"));
+        assert!(!plan.video_channel.to_lowercase().contains("png"));
+        assert!(!plan.video_channel.to_lowercase().contains("/frame"));
     }
 
     #[test]

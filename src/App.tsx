@@ -19,12 +19,12 @@ import {
   createVirtualDisplay,
   disconnectPeer,
   destroyVirtualDisplay,
-  fetchRemoteFrame,
   getCapabilities,
-  getFrameServerLanUrl,
+  getControlServerLanUrl,
   getPermissions,
   getSession,
   getStreamState,
+  getVideoBackend,
   getVirtualDisplayBackend,
   listAudioDevices,
   listPeers,
@@ -34,7 +34,9 @@ import {
   runNativeSetup,
   scanPeers,
   startStream,
+  startVideoSession,
   stopStream,
+  stopVideoSession,
 } from './tauri';
 import type {
   AudioDevice,
@@ -43,10 +45,10 @@ import type {
   NativeSetupState,
   Peer,
   PermissionState,
-  RemoteFrameResponse,
   RemoteScreen,
   SessionSnapshot,
   StreamState,
+  VideoBackendReport,
   VirtualDisplayBackendReport,
   VirtualDisplaySession,
 } from './types';
@@ -60,14 +62,10 @@ type AppData = {
   audioDevices: AudioDevice[];
   permissions: PermissionState[];
   virtualDisplayBackend: VirtualDisplayBackendReport | null;
+  videoBackend: VideoBackendReport | null;
 };
 
 const qualities: StreamState['quality'][] = ['Low latency', 'Balanced', 'Sharp'];
-const displayPollIntervals: Record<StreamState['quality'], number> = {
-  'Low latency': 33,
-  Balanced: 66,
-  Sharp: 120,
-};
 const isTauriRuntime = '__TAURI_INTERNALS__' in window;
 const queryIsDisplayWindow = new URLSearchParams(window.location.search).get('window') === 'display';
 
@@ -118,6 +116,7 @@ function ControlApp() {
     audioDevices: [],
     permissions: [],
     virtualDisplayBackend: null,
+    videoBackend: null,
   });
   const [selectedPeerId, setSelectedPeerId] = useState('');
   const [quality, setQuality] = useState<StreamState['quality']>('Low latency');
@@ -155,34 +154,11 @@ function ControlApp() {
   const screens = session?.screens ?? [];
   const isConnected = session?.status === 'connected' || session?.status === 'degraded';
   const isStreaming = stream?.status === 'streaming' || stream?.status === 'live';
-  const displayPipelineReady = data.capabilities?.display.capture === 'available'
-    || data.capabilities?.display.capture === 'permission-required';
+  const displayPipelineReady = Boolean(data.videoBackend?.available);
   const receiverReady = isStreaming && displayWindow.attached;
   const selectedPeerTrusted = selectedPeer ? trustedPeerIds.includes(selectedPeer.id) || selectedPeer.trusted : false;
   const localPairingCode = data.capabilities?.peerId ? pairingCodeForPeer(data.capabilities.peerId) : 'laden...';
   const needsMacVirtualDisplay = needsVirtualDisplayForPeer(data.capabilities, selectedPeer);
-
-  async function waitForFrameReady(frameUrl: string) {
-    let lastFrame: RemoteFrameResponse | null = null;
-
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      const frame = await fetchRemoteFrame(frameUrl);
-      if (frame.ok && frame.dataUrl) {
-        return frame;
-      }
-
-      lastFrame = frame;
-      await new Promise((resolve) => window.setTimeout(resolve, 350));
-    }
-
-    return lastFrame ?? {
-      ok: false,
-      statusCode: 0,
-      contentType: '',
-      dataUrl: null,
-      message: 'Mac capture server gaf nog geen frame terug',
-    };
-  }
 
   async function startStreamAndOpenDisplay(peer: Peer, nextSession: SessionSnapshot) {
     const virtualDisplayReady = await ensureVirtualDisplayForSession(peer, nextSession);
@@ -271,23 +247,30 @@ function ControlApp() {
     const localPlatform = data.capabilities?.platform.toLowerCase() ?? '';
     const localPeerId = data.capabilities?.peerId ?? 'local-source';
     const shouldOpenOnReceiver = localPlatform === 'macos' && peer.os === 'Windows';
-    const peerAddress = shouldOpenOnReceiver ? await getFrameServerLanUrl() : frameUrlForPeer(peer);
+    const controlAddress = shouldOpenOnReceiver ? await getControlServerLanUrl() : controlUrlForPeer(peer);
+    const targetMode = modeFromScreen(screens[Math.max(0, Math.min(screenCount, screens.length) - 1)]);
+    const videoSession = await startVideoSession({
+      sourcePeerId: shouldOpenOnReceiver ? localPeerId : peer.id,
+      receiverPeerId: peer.id,
+      screenCount: Math.max(screenCount, 1),
+      quality,
+      width: targetMode.width,
+      height: targetMode.height,
+      refreshHz: targetMode.refreshHz,
+      controlAddress,
+    });
     const request: DisplayWindowRequest = {
       peerId: shouldOpenOnReceiver ? localPeerId : peer.id,
-      peerAddress,
+      peerAddress: videoSession.endpoint,
+      controlAddress: videoSession.controlAddress,
+      videoSessionId: videoSession.id,
+      videoTransport: videoSession.transport,
+      videoCodec: videoSession.codec,
       screenCount: Math.max(screenCount, 1),
       quality,
     };
 
     if (shouldOpenOnReceiver) {
-      const frame = await waitForFrameReady(peerAddress);
-      if (!frame.ok) {
-        return {
-          attached: false,
-          message: `Mac stuurt nog geen geldig beeld: ${frame.message || `HTTP ${frame.statusCode}`}`,
-        };
-      }
-
       return openRemoteDisplayWindow(peer.address, request, peer.id);
     }
 
@@ -297,7 +280,7 @@ function ControlApp() {
   async function loadEverything(scan = false) {
     setIsScanning(scan);
     try {
-      const [peers, session, stream, capabilities, audioDevices, permissions, virtualDisplayBackend] = await Promise.all([
+      const [peers, session, stream, capabilities, audioDevices, permissions, virtualDisplayBackend, videoBackend] = await Promise.all([
         scan ? scanPeers() : listPeers(),
         getSession(),
         getStreamState(),
@@ -305,9 +288,10 @@ function ControlApp() {
         listAudioDevices(),
         getPermissions(),
         getVirtualDisplayBackend(),
+        getVideoBackend(),
       ]);
 
-      setData({ peers, session, stream, capabilities, audioDevices, permissions, virtualDisplayBackend });
+      setData({ peers, session, stream, capabilities, audioDevices, permissions, virtualDisplayBackend, videoBackend });
       setSelectedPeerId((current) => session.activePeerId ?? (current || peers[0]?.id || ''));
     } finally {
       setIsScanning(false);
@@ -327,6 +311,7 @@ function ControlApp() {
     try {
       if (isConnected) {
         const nextStream = await stopStream();
+        await stopVideoSession();
         const nextSession = await disconnectPeer();
         const nextDisplayWindow = await closeDisplayWindow();
         if (virtualDisplay?.active) {
@@ -745,18 +730,12 @@ function ControlApp() {
 
 function DisplayWindow() {
   const [config, setConfig] = useState(readDisplayWindowConfig);
-  const [frameSrc, setFrameSrc] = useState('');
-  const [lastFrameAt, setLastFrameAt] = useState('');
-  const [frameError, setFrameError] = useState('');
   const [controlError, setControlError] = useState('');
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const diagnosticInFlight = useRef(false);
-  const frameInFlight = useRef(false);
-  const hasFrameRef = useRef(false);
   const inputSequence = useRef(0);
   const screenCount = Math.max(1, Math.min(Number(config.screenCount || 1), 3));
   const screens = Array.from({ length: screenCount }, (_, index) => index + 1);
-  const hasLiveFrame = Boolean(frameSrc && !frameError);
+  const hasVideoSession = Boolean(config.peerAddress && !config.peerAddress.includes('/frame'));
 
   useEffect(() => {
     const refreshConfig = () => setConfig(readDisplayWindowConfig());
@@ -768,44 +747,6 @@ function DisplayWindow() {
       window.removeEventListener('storage', refreshConfig);
     };
   }, []);
-
-  useEffect(() => {
-    if (!config.peerAddress) {
-      setFrameSrc('');
-      hasFrameRef.current = false;
-      setFrameError('Geen frame URL ontvangen');
-      return;
-    }
-
-    setFrameSrc('');
-    hasFrameRef.current = false;
-    const refreshFrame = async () => {
-      if (frameInFlight.current) return;
-
-      frameInFlight.current = true;
-      try {
-        const frame = await fetchRemoteFrame(config.peerAddress, config.quality);
-        if (frame.ok && frame.dataUrl) {
-          hasFrameRef.current = true;
-          setFrameSrc(frame.dataUrl);
-          setFrameError('');
-          setLastFrameAt(new Date().toLocaleTimeString());
-        } else if (!hasFrameRef.current) {
-          setFrameError(frame.message || `HTTP ${frame.statusCode}`);
-        }
-      } finally {
-        frameInFlight.current = false;
-      }
-    };
-
-    setFrameError('');
-    void refreshFrame();
-    const timer = window.setInterval(refreshFrame, displayPollIntervals[config.quality] ?? 66);
-
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, [config.peerAddress, config.quality]);
 
   useEffect(() => {
     const syncFullscreenState = () => setIsFullscreen(Boolean(document.fullscreenElement));
@@ -823,27 +764,6 @@ function DisplayWindow() {
       document.removeEventListener('fullscreenchange', syncFullscreenState);
     };
   }, []);
-
-  function handleFrameLoad() {
-    setFrameError('');
-    setLastFrameAt(new Date().toLocaleTimeString());
-  }
-
-  async function handleFrameError() {
-    setFrameError('Frame proxy kon nog geen geldige PNG laden');
-
-    if (diagnosticInFlight.current || !config.peerAddress) {
-      return;
-    }
-
-    diagnosticInFlight.current = true;
-    try {
-      const frame = await fetchRemoteFrame(config.peerAddress, config.quality);
-      setFrameError(frame.message || `HTTP ${frame.statusCode}`);
-    } finally {
-      diagnosticInFlight.current = false;
-    }
-  }
 
   async function handleToggleFullscreen() {
     try {
@@ -869,7 +789,7 @@ function DisplayWindow() {
   }
 
   function sendInputEvents(events: Array<Record<string, unknown>>) {
-    const inputUrl = remoteControlUrlFromFrameUrl(config.peerAddress, '/input-events');
+    const inputUrl = remoteControlUrl(config.controlAddress, '/input-events');
     if (!inputUrl || events.length === 0) return;
 
     inputSequence.current += 1;
@@ -931,40 +851,38 @@ function DisplayWindow() {
             }}
             onWheel={(event) => sendInputEvents([{ type: 'pointerWheel', deltaX: event.deltaX, deltaY: event.deltaY }])}
           >
-            {frameSrc && (
-              <img
-                alt={`PaneLink screen ${screen}`}
-                className="display-window-frame"
-                onError={handleFrameError}
-                onLoad={handleFrameLoad}
-                src={frameSrc}
-              />
-            )}
-            {(!frameSrc || frameError) && (
-              <div className={frameError ? 'display-window-placeholder error' : 'display-window-placeholder'}>
+            <video
+              aria-label={`PaneLink remote display ${screen}`}
+              autoPlay
+              className="display-window-frame"
+              muted
+              playsInline
+            />
+            {!hasVideoSession && (
+              <div className="display-window-placeholder error">
                 <Loader2 className="spin" size={24} />
-                <strong>{frameError ? 'Geen frame ontvangen' : 'Frame fetch actief'}</strong>
-                <small>{frameError || config.peerAddress || 'Geen frame URL'}</small>
+                <strong>Geen video sessie</strong>
+                <small>{config.peerAddress || 'Geen video endpoint ontvangen'}</small>
               </div>
             )}
-            {!hasLiveFrame && (
+            {hasVideoSession && (
               <div className="display-window-label">
                 <span>Screen {screen}</span>
-                <small>{config.peerAddress ? 'Frame fetch actief' : 'Geen frame URL'}</small>
+                <small>{config.videoCodec ?? 'H.264 VideoToolbox'} via {config.videoTransport ?? 'WebRTC/RTP'}</small>
               </div>
             )}
           </div>
         ))}
       </section>
-      <button className={hasLiveFrame ? 'display-fullscreen-action live' : 'display-fullscreen-action'} onClick={handleToggleFullscreen}>
+      <button className={hasVideoSession ? 'display-fullscreen-action live' : 'display-fullscreen-action'} onClick={handleToggleFullscreen}>
         {isFullscreen ? 'Venster' : 'Fullscreen'}
       </button>
-      {!hasLiveFrame && (
+      {!hasVideoSession && (
         <div className="display-window-status">
           <Monitor size={34} />
-          <strong>{frameError ? 'Frame nog niet bereikbaar' : lastFrameAt ? `Live frame ${lastFrameAt}` : 'Wachten op eerste frame'}</strong>
+          <strong>Wachten op video sessie</strong>
           <span>{config.peerId} - {config.quality}</span>
-          <small>{frameError || controlError || config.peerAddress || 'Geen frame URL ontvangen'}</small>
+          <small>{controlError || config.peerAddress || 'Geen video endpoint ontvangen'}</small>
         </div>
       )}
     </main>
@@ -1030,6 +948,10 @@ function readDisplayWindowConfig(): DisplayWindowRequest {
     ? {
         peerId: params.get('peerId') ?? 'unknown',
         peerAddress: params.get('peerAddress') ?? '',
+        controlAddress: params.get('controlAddress') ?? '',
+        videoSessionId: params.get('videoSessionId') ?? '',
+        videoTransport: params.get('videoTransport') ?? 'WebRTC/RTP',
+        videoCodec: params.get('videoCodec') ?? 'H.264 VideoToolbox',
         screenCount: Number(params.get('screens') ?? 1),
         quality: (params.get('quality') ?? 'Low latency') as StreamState['quality'],
       }
@@ -1042,22 +964,35 @@ function readDisplayWindowConfig(): DisplayWindowRequest {
   try {
     const saved = window.localStorage.getItem('panelink.displayWindow');
     if (saved) {
-      return JSON.parse(saved) as DisplayWindowRequest;
+      return normalizeDisplayWindowRequest(JSON.parse(saved) as Partial<DisplayWindowRequest>);
     }
   } catch {
     // Fall through to the default below.
   }
 
-  return { peerId: 'unknown', peerAddress: '', screenCount: 1, quality: 'Low latency' };
+  return normalizeDisplayWindowRequest({});
 }
 
-function frameUrlForPeer(peer: Peer) {
+function normalizeDisplayWindowRequest(request: Partial<DisplayWindowRequest>): DisplayWindowRequest {
+  return {
+    peerId: request.peerId ?? 'unknown',
+    peerAddress: request.peerAddress ?? '',
+    controlAddress: request.controlAddress ?? '',
+    videoSessionId: request.videoSessionId ?? '',
+    videoTransport: request.videoTransport ?? 'WebRTC/RTP',
+    videoCodec: request.videoCodec ?? 'H.264 VideoToolbox',
+    screenCount: Number(request.screenCount ?? 1),
+    quality: request.quality ?? 'Low latency',
+  };
+}
+
+function controlUrlForPeer(peer: Peer) {
   const address = peer.address.trim();
   const host = address.startsWith('[')
     ? address.slice(1, address.indexOf(']'))
     : address.split(':')[0] || address;
 
-  return `http://${host}:48171/frame`;
+  return `http://${host}:48170`;
 }
 
 function needsVirtualDisplayForPeer(capabilities: Capabilities | null, peer: Peer | undefined) {
@@ -1110,10 +1045,9 @@ function keyInputEvent(event: ReactKeyboardEvent<HTMLElement>, pressed: boolean)
   };
 }
 
-function remoteControlUrlFromFrameUrl(frameUrl: string, path: string) {
+function remoteControlUrl(controlAddress: string, path: string) {
   try {
-    const url = new URL(frameUrl);
-    url.port = '48170';
+    const url = new URL(controlAddress);
     url.pathname = path;
     url.search = '';
     url.hash = '';

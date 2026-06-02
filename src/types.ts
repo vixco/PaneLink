@@ -93,6 +93,10 @@ export type StartStreamRequest = {
 export type DisplayWindowRequest = {
   peerId: string;
   peerAddress: string;
+  controlAddress: string;
+  videoSessionId?: string;
+  videoTransport?: string;
+  videoCodec?: string;
   screenCount: number;
   quality: StreamState['quality'];
 };
@@ -147,6 +151,44 @@ export type VirtualDisplaySession = {
   width: number;
   height: number;
   refreshHz: number;
+  message: string;
+};
+
+export type VideoBackendReport = {
+  backend: string;
+  state: 'available' | 'permission-required' | 'receiver-only' | 'unsupported';
+  available: boolean;
+  transport: string;
+  codec: string;
+  hardwareAccelerated: boolean;
+  message: string;
+  actions: string[];
+};
+
+export type VideoSessionRequest = {
+  sourcePeerId: string;
+  receiverPeerId: string;
+  screenCount: number;
+  quality: StreamState['quality'];
+  width: number;
+  height: number;
+  refreshHz: number;
+  controlAddress: string;
+};
+
+export type VideoSession = {
+  id: string;
+  active: boolean;
+  endpoint: string;
+  controlAddress: string;
+  transport: string;
+  codec: string;
+  quality: StreamState['quality'];
+  targetFps: number;
+  targetBitrateMbps: number;
+  screenCount: number;
+  width: number;
+  height: number;
   message: string;
 };
 

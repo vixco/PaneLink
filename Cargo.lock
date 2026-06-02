@@ -3045,7 +3045,7 @@ dependencies = [
 
 [[package]]
 name = "panelink"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "base64 0.22.1",
  "panelink-audio",
@@ -3054,6 +3054,7 @@ dependencies = [
  "panelink-discovery",
  "panelink-input",
  "panelink-transport",
+ "panelink-video",
  "panelink-virtual-display",
  "serde",
  "serde_json",
@@ -3113,6 +3114,13 @@ name = "panelink-transport"
 version = "0.1.0"
 dependencies = [
  "panelink-core",
+ "serde",
+]
+
+[[package]]
+name = "panelink-video"
+version = "0.1.0"
+dependencies = [
  "serde",
 ]
 

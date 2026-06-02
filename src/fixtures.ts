@@ -5,6 +5,7 @@ import type {
   PermissionState,
   SessionSnapshot,
   StreamState,
+  VideoBackendReport,
   VirtualDisplayBackendReport,
 } from './types';
 
@@ -85,6 +86,17 @@ export const fallbackVirtualDisplayBackend: VirtualDisplayBackendReport = {
   actions: [],
 };
 
+export const fallbackVideoBackend: VideoBackendReport = {
+  backend: 'Browser preview receiver',
+  state: 'receiver-only',
+  available: true,
+  transport: 'WebRTC/RTP preview',
+  codec: 'H.264 browser decode',
+  hardwareAccelerated: true,
+  message: 'Native remote-desktop video is available in the installed PaneLink app; browser preview simulates the session contract.',
+  actions: [],
+};
+
 export const fallbackSession: SessionSnapshot = {
   status: 'ready',
   activePeerId: 'windows-desk',
@@ -109,8 +121,8 @@ export const fallbackSession: SessionSnapshot = {
   latencyMs: 9,
   bitrateMbps: 58,
   packetLoss: 0.1,
-  encoder: 'H.264 low latency',
-  transport: 'Local preview',
+  encoder: 'H.264 VideoToolbox',
+  transport: 'WebRTC',
   audioOutput: 'System Default Output',
   micInput: 'System Default Microphone',
 };
@@ -119,8 +131,8 @@ export const fallbackStreamState: StreamState = {
   status: 'idle',
   activePeerId: null,
   screenIds: [],
-  codec: 'H.264 low latency',
-  transport: 'Local preview',
+  codec: 'H.264 VideoToolbox',
+  transport: 'WebRTC',
   quality: 'Low latency',
   width: 0,
   height: 0,

@@ -3,7 +3,7 @@ use panelink_core::{
     AudioCapabilities, AudioDevice, Capabilities, CaptureState, DisplayCapabilities,
     PermissionState, PermissionStatus, RoutingState, SessionSnapshot, VirtualDisplayState,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     io::Cursor,
@@ -107,6 +107,21 @@ fn get_frame_server_lan_url() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_control_server_lan_url() -> Result<String, String> {
+    let advertisement = panelink_discovery::advertise_payload();
+    let host = host_from_authority(&advertisement.address)
+        .filter(|host| host != "0.0.0.0" && host != "127.0.0.1")
+        .ok_or_else(|| {
+            "Could not determine this device's LAN address for remote display control".to_string()
+        })?;
+
+    Ok(format!(
+        "http://{host}:{}",
+        panelink_discovery::DEFAULT_PORT
+    ))
+}
+
+#[tauri::command]
 fn fetch_remote_frame(url: String) -> RemoteFrameResponse {
     match fetch_http_bytes(&url, Duration::from_millis(1200)) {
         Ok(response) => response,
@@ -124,19 +139,10 @@ fn fetch_remote_frame(url: String) -> RemoteFrameResponse {
 fn open_remote_display_window(
     receiver_address: String,
     receiver_peer_id: Option<String>,
-    peer_id: String,
-    peer_address: String,
-    screen_count: Option<u8>,
-    quality: Option<String>,
+    request: DisplayWindowOpenRequest,
 ) -> RemoteDisplayResponse {
     let mut attempted_addresses = Vec::new();
-    match request_receiver_display(
-        &receiver_address,
-        &peer_id,
-        &peer_address,
-        screen_count,
-        quality.as_deref(),
-    ) {
+    match request_receiver_display(&receiver_address, &request) {
         Ok(response) => return response,
         Err(error) => attempted_addresses.push(format!("{receiver_address}: {error}")),
     }
@@ -145,13 +151,7 @@ fn open_remote_display_window(
         if let Some(refreshed_address) =
             refreshed_receiver_address(&receiver_peer_id, &receiver_address)
         {
-            match request_receiver_display(
-                &refreshed_address,
-                &peer_id,
-                &peer_address,
-                screen_count,
-                quality.as_deref(),
-            ) {
+            match request_receiver_display(&refreshed_address, &request) {
                 Ok(response) => return response,
                 Err(error) => attempted_addresses.push(format!("{refreshed_address}: {error}")),
             }
@@ -170,21 +170,32 @@ fn open_remote_display_window(
 
 fn request_receiver_display(
     receiver_address: &str,
-    peer_id: &str,
-    peer_address: &str,
-    screen_count: Option<u8>,
-    quality: Option<&str>,
+    request: &DisplayWindowOpenRequest,
 ) -> Result<RemoteDisplayResponse, String> {
     let host = host_from_authority(receiver_address)
         .ok_or_else(|| "Receiver address is missing a LAN host".to_string())?;
+    let peer_id = request
+        .peer_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("unknown");
+    let peer_address = request
+        .peer_address
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Remote display request is missing video endpoint".to_string())?;
     let url = format!(
-        "http://{}:{}/open-display?peerId={}&peerAddress={}&screens={}&quality={}",
+        "http://{}:{}/open-display?peerId={}&peerAddress={}&controlAddress={}&videoSessionId={}&videoTransport={}&videoCodec={}&screens={}&quality={}",
         host,
         panelink_discovery::DEFAULT_PORT,
         percent_encode(peer_id),
         percent_encode(peer_address),
-        screen_count.unwrap_or(1).clamp(1, 3),
-        percent_encode(quality.unwrap_or("Low latency"))
+        percent_encode(request.control_address.as_deref().unwrap_or_default()),
+        percent_encode(request.video_session_id.as_deref().unwrap_or_default()),
+        percent_encode(request.video_transport.as_deref().unwrap_or("WebRTC/RTP")),
+        percent_encode(request.video_codec.as_deref().unwrap_or("H.264 VideoToolbox")),
+        request.screen_count.unwrap_or(1).clamp(1, 3),
+        percent_encode(request.quality.as_deref().unwrap_or("Low latency"))
     );
 
     match fetch_http_text(&url, Duration::from_millis(1600)) {
@@ -236,29 +247,20 @@ fn stop_stream() -> panelink_transport::StreamState {
 }
 
 #[tauri::command]
-fn open_display_window(
-    app: AppHandle,
-    screen_count: Option<u8>,
-    peer_id: Option<String>,
-    peer_address: Option<String>,
-    quality: Option<String>,
-) -> Result<(), String> {
-    open_display_window_for_request(
-        app,
-        DisplayWindowOpenRequest {
-            screen_count,
-            peer_id,
-            peer_address,
-            quality,
-        },
-    )
+fn open_display_window(app: AppHandle, request: DisplayWindowOpenRequest) -> Result<(), String> {
+    open_display_window_for_request(app, request)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DisplayWindowOpenRequest {
     screen_count: Option<u8>,
     peer_id: Option<String>,
     peer_address: Option<String>,
+    control_address: Option<String>,
+    video_session_id: Option<String>,
+    video_transport: Option<String>,
+    video_codec: Option<String>,
     quality: Option<String>,
 }
 
@@ -269,9 +271,13 @@ fn open_display_window_for_request(
     let screen_count = request.screen_count.unwrap_or(1).clamp(1, 3);
     let initial_width = if screen_count > 1 { 1440.0 } else { 1280.0 };
     let display_url = format!(
-        "index.html?window=display&peerId={}&peerAddress={}&screens={screen_count}&quality={}",
+        "index.html?window=display&peerId={}&peerAddress={}&controlAddress={}&videoSessionId={}&videoTransport={}&videoCodec={}&screens={screen_count}&quality={}",
         percent_encode(&request.peer_id.unwrap_or_else(|| "unknown".into())),
         percent_encode(&request.peer_address.unwrap_or_default()),
+        percent_encode(&request.control_address.unwrap_or_default()),
+        percent_encode(&request.video_session_id.unwrap_or_default()),
+        percent_encode(&request.video_transport.unwrap_or_else(|| "WebRTC/RTP".into())),
+        percent_encode(&request.video_codec.unwrap_or_else(|| "H.264 VideoToolbox".into())),
         percent_encode(&request.quality.unwrap_or_else(|| "Low latency".into()))
     );
 
@@ -872,6 +878,10 @@ fn display_request_from_url(url: &str) -> Result<DisplayWindowOpenRequest, Strin
         screen_count: Some(screen_count),
         peer_id: values.get("peerId").cloned(),
         peer_address: Some(peer_address),
+        control_address: values.get("controlAddress").cloned(),
+        video_session_id: values.get("videoSessionId").cloned(),
+        video_transport: values.get("videoTransport").cloned(),
+        video_codec: values.get("videoCodec").cloned(),
         quality: values.get("quality").cloned(),
     })
 }
@@ -972,15 +982,22 @@ mod tests {
     #[test]
     fn display_request_from_url_decodes_remote_display_payload() {
         let request = display_request_from_url(
-            "/open-display?peerId=mac%201&peerAddress=http%3A%2F%2F192.168.1.24%3A48171%2Fframe&screens=2&quality=Low+latency",
+            "/open-display?peerId=mac%201&peerAddress=webrtc%2Brtp%3A%2F%2Fwindows%2Fpanelink%2Fvideo-1&controlAddress=http%3A%2F%2F192.168.1.24%3A48170&videoSessionId=video-1&videoTransport=WebRTC%2FRTP&videoCodec=H.264+VideoToolbox&screens=2&quality=Low+latency",
         )
         .expect("remote display request should parse");
 
         assert_eq!(request.peer_id.as_deref(), Some("mac 1"));
         assert_eq!(
             request.peer_address.as_deref(),
-            Some("http://192.168.1.24:48171/frame")
+            Some("webrtc+rtp://windows/panelink/video-1")
         );
+        assert_eq!(
+            request.control_address.as_deref(),
+            Some("http://192.168.1.24:48170")
+        );
+        assert_eq!(request.video_session_id.as_deref(), Some("video-1"));
+        assert_eq!(request.video_transport.as_deref(), Some("WebRTC/RTP"));
+        assert_eq!(request.video_codec.as_deref(), Some("H.264 VideoToolbox"));
         assert_eq!(request.screen_count, Some(2));
         assert_eq!(request.quality.as_deref(), Some("Low latency"));
     }
@@ -1095,25 +1112,46 @@ fn destroy_virtual_display(
 }
 
 #[tauri::command]
+fn get_video_backend() -> panelink_video::VideoBackendReport {
+    panelink_video::backend_report()
+}
+
+#[tauri::command]
+fn start_video_session(
+    request: panelink_video::VideoSessionRequest,
+) -> Result<panelink_video::VideoSession, String> {
+    panelink_video::start_video_session(request)
+}
+
+#[tauri::command]
+fn get_current_video_session() -> Option<panelink_video::VideoSession> {
+    panelink_video::current_video_session()
+}
+
+#[tauri::command]
+fn stop_video_session() -> Option<panelink_video::VideoSession> {
+    panelink_video::stop_video_session()
+}
+
+#[tauri::command]
 fn get_capabilities() -> Capabilities {
     let capture = panelink_capture::current_capture_backend();
     let virtual_display = panelink_virtual_display::backend_report();
+    let video = panelink_video::backend_report();
 
     Capabilities {
         app_version: env!("CARGO_PKG_VERSION").into(),
         peer_id: panelink_core::local_peer_id(),
         platform: std::env::consts::OS.into(),
         video_encoders: vec![
-            "H.264 low latency".into(),
-            "HEVC hardware planned".into(),
-            "AV1 planned".into(),
+            "H.264 VideoToolbox".into(),
+            "HEVC VideoToolbox".into(),
+            "H.264 hardware decode".into(),
         ],
         transport: vec![
             panelink_transport::default_transport_plan().primary,
-            format!(
-                "PNG frame server on :{}",
-                panelink_capture::FRAME_SERVER_PORT
-            ),
+            video.transport,
+            "Debug PNG frame server is disabled for product display".into(),
             panelink_discovery::SERVICE_NAME.into(),
         ],
         audio: AudioCapabilities {
@@ -1244,6 +1282,7 @@ fn main() {
             issue_pairing_token,
             get_frame_server_url,
             get_frame_server_lan_url,
+            get_control_server_lan_url,
             fetch_remote_frame,
             open_remote_display_window,
             get_session_snapshot,
@@ -1265,6 +1304,10 @@ fn main() {
             get_virtual_display_backend,
             create_virtual_display,
             destroy_virtual_display,
+            get_video_backend,
+            start_video_session,
+            get_current_video_session,
+            stop_video_session,
             get_capabilities,
             get_permissions,
             run_native_setup

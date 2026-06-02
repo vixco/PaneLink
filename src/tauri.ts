@@ -6,6 +6,7 @@ import {
   fallbackPermissions,
   fallbackSession,
   fallbackStreamState,
+  fallbackVideoBackend,
   fallbackVirtualDisplayBackend,
 } from './fixtures';
 import type {
@@ -22,6 +23,9 @@ import type {
   SessionSnapshot,
   StartStreamRequest,
   StreamState,
+  VideoBackendReport,
+  VideoSession,
+  VideoSessionRequest,
   VirtualDisplayBackendReport,
   VirtualDisplayRequest,
   VirtualDisplaySession,
@@ -31,6 +35,7 @@ const isTauri = '__TAURI_INTERNALS__' in window;
 let browserSession: SessionSnapshot = fallbackSession;
 let browserStream: StreamState = fallbackStreamState;
 let browserDisplayWindow: Window | null = null;
+let browserVideoSession: VideoSession | null = null;
 
 function withNow<T extends { updatedAt?: string }>(value: T): T {
   return { ...value, updatedAt: new Date().toISOString() };
@@ -55,8 +60,8 @@ function streamForSession(request: StartStreamRequest, session: SessionSnapshot)
     status: 'streaming',
     activePeerId: request.peerId,
     screenIds: request.screenIds,
-    codec: request.quality === 'Sharp' ? 'HEVC quality path' : 'H.264 low latency',
-    transport: session.transport,
+    codec: request.quality === 'Sharp' ? 'HEVC VideoToolbox' : 'H.264 VideoToolbox',
+    transport: 'WebRTC',
     quality: request.quality,
     width: resolution.width * multiplier,
     height: resolution.height,
@@ -203,6 +208,10 @@ export function openDisplayWindow(request: DisplayWindowRequest) {
       window: 'display',
       peerId: request.peerId,
       peerAddress: request.peerAddress,
+      controlAddress: request.controlAddress,
+      videoSessionId: request.videoSessionId ?? '',
+      videoTransport: request.videoTransport ?? 'WebRTC/RTP',
+      videoCodec: request.videoCodec ?? 'H.264 VideoToolbox',
       screens: String(Math.max(1, Math.min(request.screenCount, 3))),
       quality: request.quality,
     });
@@ -217,7 +226,7 @@ export function openDisplayWindow(request: DisplayWindowRequest) {
   return call<DisplayWindowState>(
     'open_display_window',
     { attached: false, message: 'Display window could not be opened' },
-    request,
+    { request },
   ).then(() => ({ attached: true, message: 'Display window opened' }));
 }
 
@@ -232,10 +241,7 @@ export function openRemoteDisplayWindow(receiverAddress: string, request: Displa
     {
       receiverAddress,
       receiverPeerId,
-      peerId: request.peerId,
-      peerAddress: request.peerAddress,
-      screenCount: request.screenCount,
-      quality: request.quality,
+      request,
     },
   ).then((response) => ({
     attached: response.ok,
@@ -266,6 +272,45 @@ export function runNativeSetup() {
 
 export function getVirtualDisplayBackend() {
   return call<VirtualDisplayBackendReport>('get_virtual_display_backend', fallbackVirtualDisplayBackend);
+}
+
+export function getVideoBackend() {
+  return call<VideoBackendReport>('get_video_backend', fallbackVideoBackend);
+}
+
+export function startVideoSession(request: VideoSessionRequest) {
+  const fallback: VideoSession = {
+    id: `browser-video-${Date.now()}`,
+    active: true,
+    endpoint: `webrtc+rtp://${request.receiverPeerId}/panelink/browser?screens=${request.screenCount}`,
+    controlAddress: request.controlAddress,
+    transport: 'WebRTC/RTP',
+    codec: request.quality === 'Sharp' ? 'HEVC VideoToolbox' : 'H.264 VideoToolbox',
+    quality: request.quality,
+    targetFps: request.quality === 'Sharp' ? 60 : request.quality === 'Balanced' ? 90 : 120,
+    targetBitrateMbps: request.screenCount * (request.quality === 'Sharp' ? 52 : request.quality === 'Balanced' ? 36 : 28),
+    screenCount: request.screenCount,
+    width: request.width,
+    height: request.height,
+    message: 'Browser preview video session negotiated.',
+  };
+
+  if (!isTauri) {
+    browserVideoSession = fallback;
+    return Promise.resolve(fallback);
+  }
+
+  return call<VideoSession>('start_video_session', fallback, { request });
+}
+
+export function getCurrentVideoSession() {
+  return call<VideoSession | null>('get_current_video_session', browserVideoSession);
+}
+
+export function stopVideoSession() {
+  const fallback = browserVideoSession ? { ...browserVideoSession, active: false, message: 'Video session stopped' } : null;
+  browserVideoSession = null;
+  return call<VideoSession | null>('stop_video_session', fallback);
 }
 
 export function createVirtualDisplay(request: VirtualDisplayRequest) {
@@ -308,6 +353,10 @@ export function getFrameServerUrl() {
 
 export function getFrameServerLanUrl() {
   return call<string>('get_frame_server_lan_url', 'http://127.0.0.1:48171/frame');
+}
+
+export function getControlServerLanUrl() {
+  return call<string>('get_control_server_lan_url', 'http://127.0.0.1:48170');
 }
 
 export function getDisplayFrameImageUrl(url: string, nonce: number, quality: StreamState['quality']) {
