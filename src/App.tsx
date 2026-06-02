@@ -11,7 +11,7 @@ import {
   Wifi,
   WifiOff,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   addRemoteScreen,
   closeDisplayWindow,
@@ -19,6 +19,7 @@ import {
   disconnectPeer,
   fetchRemoteFrame,
   getCapabilities,
+  getDisplayFrameImageUrl,
   getFrameServerLanUrl,
   getPermissions,
   getSession,
@@ -573,6 +574,8 @@ function DisplayWindow() {
   const [frameSrc, setFrameSrc] = useState('');
   const [lastFrameAt, setLastFrameAt] = useState('');
   const [frameError, setFrameError] = useState('');
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const diagnosticInFlight = useRef(false);
   const screenCount = Math.max(1, Math.min(Number(config.screenCount || 1), 3));
   const screens = Array.from({ length: screenCount }, (_, index) => index + 1);
 
@@ -588,48 +591,99 @@ function DisplayWindow() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    let timer: number | null = null;
+    if (!config.peerAddress) {
+      setFrameSrc('');
+      setFrameError('Geen frame URL ontvangen');
+      return;
+    }
 
-    async function loadFrame() {
-      if (!config.peerAddress) {
-        setFrameSrc('');
-        setFrameError('Geen frame URL ontvangen');
+    const refreshFrame = () => {
+      setFrameSrc(getDisplayFrameImageUrl(config.peerAddress, Date.now()));
+    };
+
+    setFrameError('');
+    refreshFrame();
+    const timer = window.setInterval(refreshFrame, 120);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [config.peerAddress]);
+
+  useEffect(() => {
+    const syncFullscreenState = () => setIsFullscreen(Boolean(document.fullscreenElement));
+
+    if (isTauriRuntime) {
+      import('@tauri-apps/api/window')
+        .then(({ getCurrentWindow }) => getCurrentWindow().isFullscreen())
+        .then(setIsFullscreen)
+        .catch(() => setIsFullscreen(false));
+    }
+
+    document.addEventListener('fullscreenchange', syncFullscreenState);
+
+    return () => {
+      document.removeEventListener('fullscreenchange', syncFullscreenState);
+    };
+  }, []);
+
+  function handleFrameLoad() {
+    setFrameError('');
+    setLastFrameAt(new Date().toLocaleTimeString());
+  }
+
+  async function handleFrameError() {
+    setFrameError('Frame proxy kon nog geen geldige PNG laden');
+
+    if (diagnosticInFlight.current || !config.peerAddress) {
+      return;
+    }
+
+    diagnosticInFlight.current = true;
+    try {
+      const frame = await fetchRemoteFrame(config.peerAddress);
+      setFrameError(frame.message || `HTTP ${frame.statusCode}`);
+    } finally {
+      diagnosticInFlight.current = false;
+    }
+  }
+
+  async function handleToggleFullscreen() {
+    try {
+      if (isTauriRuntime) {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const window = getCurrentWindow();
+        const nextFullscreen = !(await window.isFullscreen());
+        await window.setFullscreen(nextFullscreen);
+        setIsFullscreen(nextFullscreen);
         return;
       }
 
-      const frame = await fetchRemoteFrame(config.peerAddress);
-      if (cancelled) return;
-
-      if (frame.ok && frame.dataUrl) {
-        setFrameSrc(frame.dataUrl);
-        setFrameError('');
-        setLastFrameAt(new Date().toLocaleTimeString());
-        timer = window.setTimeout(loadFrame, 120);
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
       } else {
-        setFrameError(frame.message || `HTTP ${frame.statusCode}`);
-        timer = window.setTimeout(loadFrame, 1000);
+        await document.documentElement.requestFullscreen();
       }
+    } catch (error) {
+      setFrameError(error instanceof Error ? error.message : String(error));
     }
-
-    void loadFrame();
-
-    return () => {
-      cancelled = true;
-      if (timer) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, [config.peerAddress]);
+  }
 
   return (
     <main className="display-window-shell">
       <section className={`display-window-grid screen-count-${screenCount}`}>
         {screens.map((screen) => (
           <div className="display-window-screen" key={screen}>
-            {frameSrc ? (
-              <img alt={`PaneLink screen ${screen}`} className="display-window-frame" src={frameSrc} />
-            ) : (
+            {frameSrc && (
+              <img
+                alt={`PaneLink screen ${screen}`}
+                className="display-window-frame"
+                onError={handleFrameError}
+                onLoad={handleFrameLoad}
+                src={frameSrc}
+              />
+            )}
+            {(!frameSrc || frameError) && (
               <div className={frameError ? 'display-window-placeholder error' : 'display-window-placeholder'}>
                 <Loader2 className="spin" size={24} />
                 <strong>{frameError ? 'Geen frame ontvangen' : 'Frame fetch actief'}</strong>
@@ -638,11 +692,14 @@ function DisplayWindow() {
             )}
             <div className="display-window-label">
               <span>Screen {screen}</span>
-              <small>{frameSrc ? 'Live via native fetch' : config.peerAddress ? 'Frame fetch actief' : 'Geen frame URL'}</small>
+              <small>{frameSrc && !frameError ? 'Live via native fetch' : config.peerAddress ? 'Frame fetch actief' : 'Geen frame URL'}</small>
             </div>
           </div>
         ))}
       </section>
+      <button className="display-fullscreen-action" onClick={handleToggleFullscreen}>
+        {isFullscreen ? 'Venster' : 'Fullscreen'}
+      </button>
       <div className="display-window-status">
         <Monitor size={34} />
         <strong>{frameError ? 'Frame nog niet bereikbaar' : lastFrameAt ? `Live frame ${lastFrameAt}` : 'Wachten op eerste frame'}</strong>

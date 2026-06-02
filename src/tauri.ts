@@ -267,6 +267,17 @@ export function getFrameServerLanUrl() {
   return call<string>('get_frame_server_lan_url', 'http://127.0.0.1:48171/frame');
 }
 
+export function getDisplayFrameImageUrl(url: string, nonce: number) {
+  if (!url) return '';
+
+  if (isTauri) {
+    return `http://127.0.0.1:48170/frame-proxy?url=${encodeURIComponent(url)}&t=${nonce}`;
+  }
+
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}panelinkFrame=${nonce}`;
+}
+
 export async function fetchRemoteFrame(url: string) {
   if (!isTauri) {
     try {

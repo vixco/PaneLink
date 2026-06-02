@@ -35,6 +35,13 @@ struct RemoteFrameResponse {
     message: String,
 }
 
+#[derive(Debug)]
+struct RawHttpResponse {
+    status_code: u16,
+    content_type: String,
+    body: Vec<u8>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteDisplayResponse {
@@ -230,7 +237,8 @@ fn open_display_window_for_request(
         .inner_size(initial_width, 720.0)
         .min_inner_size(720.0, 420.0)
         .closable(true)
-        .decorations(true)
+        .decorations(false)
+        .fullscreen(true)
         .resizable(true)
         .visible(true)
         .build()
@@ -283,6 +291,15 @@ struct HttpTarget {
 }
 
 fn fetch_http_bytes(url: &str, timeout: Duration) -> Result<RemoteFrameResponse, String> {
+    let response = fetch_raw_http_bytes(url, timeout, 64 * 1024 * 1024)?;
+    remote_frame_response_from_raw(url, response)
+}
+
+fn fetch_raw_http_bytes(
+    url: &str,
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<RawHttpResponse, String> {
     let target = parse_http_url(url)?;
     let mut stream = connect_to_target(&target, timeout)?;
     stream
@@ -302,11 +319,11 @@ fn fetch_http_bytes(url: &str, timeout: Duration) -> Result<RemoteFrameResponse,
 
     let mut bytes = Vec::new();
     stream
-        .take(12 * 1024 * 1024)
+        .take(max_bytes)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("Could not read remote frame: {error}"))?;
 
-    parse_http_response(url, &bytes)
+    parse_raw_http_response(&bytes)
 }
 
 #[derive(Debug)]
@@ -421,7 +438,7 @@ fn connect_to_target(target: &HttpTarget, timeout: Duration) -> Result<TcpStream
     ))
 }
 
-fn parse_http_response(url: &str, bytes: &[u8]) -> Result<RemoteFrameResponse, String> {
+fn parse_raw_http_response(bytes: &[u8]) -> Result<RawHttpResponse, String> {
     let header_end = bytes
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -443,29 +460,56 @@ fn parse_http_response(url: &str, bytes: &[u8]) -> Result<RemoteFrameResponse, S
         })
         .unwrap_or_default();
 
-    if status_code == 200 && body.starts_with(b"\x89PNG\r\n\x1a\n") {
+    Ok(RawHttpResponse {
+        status_code,
+        content_type,
+        body: body.to_vec(),
+    })
+}
+
+fn remote_frame_response_from_raw(
+    url: &str,
+    response: RawHttpResponse,
+) -> Result<RemoteFrameResponse, String> {
+    if response.status_code == 200 && response.body.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Ok(RemoteFrameResponse {
             ok: true,
-            status_code,
+            status_code: response.status_code,
             content_type: "image/png".into(),
             data_url: Some(format!(
                 "data:image/png;base64,{}",
-                BASE64_STANDARD.encode(body)
+                BASE64_STANDARD.encode(response.body)
             )),
             message: format!("Frame loaded from {url}"),
         });
     }
 
-    let message = if body.is_empty() {
-        format!("Remote frame returned HTTP {status_code}")
+    let message = if response.body.is_empty() {
+        format!("Remote frame returned HTTP {}", response.status_code)
+    } else if response.body.len() <= 4096
+        && response
+            .body
+            .iter()
+            .all(|byte| byte.is_ascii_graphic() || byte.is_ascii_whitespace())
+    {
+        String::from_utf8_lossy(&response.body).trim().to_string()
     } else {
-        String::from_utf8_lossy(body).trim().to_string()
+        format!(
+            "Remote frame was not a valid PNG (HTTP {}, content-type {}, {} bytes)",
+            response.status_code,
+            if response.content_type.is_empty() {
+                "unknown"
+            } else {
+                &response.content_type
+            },
+            response.body.len()
+        )
     };
 
     Ok(RemoteFrameResponse {
         ok: false,
-        status_code,
-        content_type,
+        status_code: response.status_code,
+        content_type: response.content_type,
         data_url: None,
         message,
     })
@@ -527,6 +571,11 @@ fn run_remote_control_server(app: AppHandle, server: Server) {
                 }
                 Err(error) => text_control_response(error, StatusCode(400)),
             }
+        } else if method == "GET" && path == "/frame-proxy" {
+            match frame_proxy_url_from_request(&url) {
+                Ok(frame_url) => proxied_frame_response(&frame_url),
+                Err(error) => text_control_response(error, StatusCode(400)),
+            }
         } else if path == "/health" {
             text_control_response("ok", StatusCode(200))
         } else {
@@ -534,6 +583,44 @@ fn run_remote_control_server(app: AppHandle, server: Server) {
         };
 
         let _ = request.respond(response);
+    }
+}
+
+fn frame_proxy_url_from_request(url: &str) -> Result<String, String> {
+    let query = url
+        .split_once('?')
+        .map(|(_, query)| query)
+        .ok_or_else(|| "Frame proxy request is missing query parameters".to_string())?;
+    let values = parse_query(query);
+
+    values
+        .get("url")
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .ok_or_else(|| "Frame proxy request is missing url".to_string())
+}
+
+fn proxied_frame_response(frame_url: &str) -> Response<Cursor<Vec<u8>>> {
+    match fetch_raw_http_bytes(frame_url, Duration::from_millis(1400), 64 * 1024 * 1024) {
+        Ok(response)
+            if response.status_code == 200 && response.body.starts_with(b"\x89PNG\r\n\x1a\n") =>
+        {
+            binary_control_response(response.body, "image/png", StatusCode(200))
+        }
+        Ok(response) => text_control_response(
+            format!(
+                "Remote frame was not a valid PNG (HTTP {}, content-type {}, {} bytes)",
+                response.status_code,
+                if response.content_type.is_empty() {
+                    "unknown"
+                } else {
+                    &response.content_type
+                },
+                response.body.len()
+            ),
+            StatusCode(502),
+        ),
+        Err(error) => text_control_response(error, StatusCode(502)),
     }
 }
 
@@ -612,6 +699,23 @@ fn text_control_response(text: impl Into<String>, status: StatusCode) -> Respons
         .with_header(header("Access-Control-Allow-Origin", "*"))
         .with_header(header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
         .with_header(header("Access-Control-Allow-Headers", "*"))
+}
+
+fn binary_control_response(
+    data: Vec<u8>,
+    content_type: &'static str,
+    status: StatusCode,
+) -> Response<Cursor<Vec<u8>>> {
+    Response::from_data(data)
+        .with_status_code(status)
+        .with_header(header("Content-Type", content_type))
+        .with_header(header("Access-Control-Allow-Origin", "*"))
+        .with_header(header("Access-Control-Allow-Methods", "GET, OPTIONS"))
+        .with_header(header("Access-Control-Allow-Headers", "*"))
+        .with_header(header(
+            "Cache-Control",
+            "no-store, no-cache, must-revalidate",
+        ))
 }
 
 fn header(name: &'static str, value: &'static str) -> Header {

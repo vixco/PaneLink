@@ -520,10 +520,10 @@ button:disabled {
 
 .display-window-grid {
   position: absolute;
-  inset: 22px;
+  inset: 0;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
+  gap: 0;
 }
 
 .display-window-grid.screen-count-1 {
@@ -537,13 +537,12 @@ button:disabled {
 .display-window-screen {
   position: relative;
   min-height: 140px;
-  border: 1px solid rgba(142, 188, 255, 0.28);
-  border-radius: 8px;
+  border: 0;
+  border-radius: 0;
   overflow: hidden;
   background:
     repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 12px),
     linear-gradient(135deg, rgba(42, 100, 160, 0.72), rgba(12, 22, 34, 0.92));
-  padding: 22px;
 }
 
 .display-window-frame,
@@ -585,6 +584,7 @@ button:disabled {
   border-radius: 8px;
   background: rgba(5, 9, 14, 0.72);
   padding: 9px 10px;
+  margin: 14px;
 }
 
 .display-window-screen:first-child {
@@ -622,6 +622,25 @@ button:disabled {
   gap: 8px;
   padding: 18px;
   text-align: center;
+}
+
+.display-fullscreen-action {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 3;
+  min-height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(5, 9, 14, 0.72);
+  color: #fff;
+  cursor: pointer;
+  font-weight: 900;
+  padding: 7px 11px;
+}
+
+.display-fullscreen-action:hover {
+  background: rgba(5, 9, 14, 0.9);
 }
 
 .display-window-status strong {
