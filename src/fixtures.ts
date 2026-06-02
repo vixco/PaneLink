@@ -1,4 +1,12 @@
-import type { AudioDevice, Capabilities, Peer, PermissionState, SessionSnapshot, StreamState } from './types';
+import type {
+  AudioDevice,
+  Capabilities,
+  Peer,
+  PermissionState,
+  SessionSnapshot,
+  StreamState,
+  VirtualDisplayBackendReport,
+} from './types';
 
 export const fallbackPeers: Peer[] = [
   {
@@ -67,6 +75,15 @@ export const fallbackPermissions: PermissionState[] = [
     detail: 'Requires signed virtual audio drivers for full system routing.',
   },
 ];
+
+export const fallbackVirtualDisplayBackend: VirtualDisplayBackendReport = {
+  backend: 'Browser preview',
+  state: 'driver-required',
+  available: false,
+  requiresExternalTool: false,
+  message: 'Virtual displays are only available in the installed macOS PaneLink app.',
+  actions: [],
+};
 
 export const fallbackSession: SessionSnapshot = {
   status: 'ready',

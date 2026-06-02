@@ -6,6 +6,7 @@ members = [
   "crates/panelink-capture",
   "crates/panelink-audio",
   "crates/panelink-input",
+  "crates/panelink-virtual-display",
   "src-tauri",
 ]
 resolver = "2"
@@ -34,3 +35,4 @@ panelink-transport = { path = "crates/panelink-transport" }
 panelink-capture = { path = "crates/panelink-capture" }
 panelink-audio = { path = "crates/panelink-audio" }
 panelink-input = { path = "crates/panelink-input" }
+panelink-virtual-display = { path = "crates/panelink-virtual-display" }

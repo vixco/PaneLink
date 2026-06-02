@@ -123,6 +123,33 @@ export type NativeSetupState = {
   requiresRestart: boolean;
 };
 
+export type VirtualDisplayBackendReport = {
+  backend: string;
+  state: 'available' | 'driver-required' | 'unsupported';
+  available: boolean;
+  requiresExternalTool: boolean;
+  message: string;
+  actions: string[];
+};
+
+export type VirtualDisplayRequest = {
+  name: string;
+  width: number;
+  height: number;
+  refreshHz: number;
+};
+
+export type VirtualDisplaySession = {
+  id: string;
+  active: boolean;
+  backend: string;
+  displayName: string;
+  width: number;
+  height: number;
+  refreshHz: number;
+  message: string;
+};
+
 export type RemoteScreen = {
   id: string;
   name: string;

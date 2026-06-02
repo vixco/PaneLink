@@ -703,7 +703,7 @@ fn start_remote_control_server(app: AppHandle) -> Result<(), String> {
 }
 
 fn run_remote_control_server(app: AppHandle, server: Server) {
-    for request in server.incoming_requests() {
+    for mut request in server.incoming_requests() {
         let method = request.method().as_str().to_string();
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or("/");
@@ -727,6 +727,8 @@ fn run_remote_control_server(app: AppHandle, server: Server) {
                 Ok(frame_url) => proxied_frame_response(&frame_url),
                 Err(error) => text_control_response(error, StatusCode(400)),
             }
+        } else if method == "POST" && path == "/input-events" {
+            remote_input_response(&mut request)
         } else if path == "/health" {
             text_control_response("ok", StatusCode(200))
         } else {
@@ -734,6 +736,29 @@ fn run_remote_control_server(app: AppHandle, server: Server) {
         };
 
         let _ = request.respond(response);
+    }
+}
+
+fn remote_input_response(request: &mut tiny_http::Request) -> Response<Cursor<Vec<u8>>> {
+    let mut body = String::new();
+    if let Err(error) = request.as_reader().read_to_string(&mut body) {
+        return text_control_response(
+            format!("Could not read input batch: {error}"),
+            StatusCode(400),
+        );
+    }
+
+    match serde_json::from_str::<panelink_input::InputEventBatch>(&body) {
+        Ok(batch) => match serde_json::to_string(&panelink_input::accept_batch(batch)) {
+            Ok(receipt) => text_control_response(receipt, StatusCode(200)),
+            Err(error) => text_control_response(
+                format!("Could not encode input receipt: {error}"),
+                StatusCode(500),
+            ),
+        },
+        Err(error) => {
+            text_control_response(format!("Invalid input batch: {error}"), StatusCode(400))
+        }
     }
 }
 
@@ -1005,8 +1030,28 @@ fn submit_input_batch(batch: panelink_input::InputEventBatch) -> panelink_input:
 }
 
 #[tauri::command]
+fn get_virtual_display_backend() -> panelink_virtual_display::VirtualDisplayBackendReport {
+    panelink_virtual_display::backend_report()
+}
+
+#[tauri::command]
+fn create_virtual_display(
+    request: panelink_virtual_display::VirtualDisplayRequest,
+) -> Result<panelink_virtual_display::VirtualDisplaySession, String> {
+    panelink_virtual_display::create_virtual_display(request)
+}
+
+#[tauri::command]
+fn destroy_virtual_display(
+    id: String,
+) -> Result<panelink_virtual_display::VirtualDisplaySession, String> {
+    panelink_virtual_display::destroy_virtual_display(id)
+}
+
+#[tauri::command]
 fn get_capabilities() -> Capabilities {
     let capture = panelink_capture::current_capture_backend();
+    let virtual_display = panelink_virtual_display::backend_report();
 
     Capabilities {
         app_version: env!("CARGO_PKG_VERSION").into(),
@@ -1038,7 +1083,11 @@ fn get_capabilities() -> Capabilities {
             } else {
                 CaptureState::Stub
             },
-            virtual_display: VirtualDisplayState::DriverRequired,
+            virtual_display: if virtual_display.available {
+                VirtualDisplayState::Available
+            } else {
+                VirtualDisplayState::DriverRequired
+            },
         },
     }
 }
@@ -1167,6 +1216,9 @@ fn main() {
             get_audio_route_catalog,
             get_input_backend_report,
             submit_input_batch,
+            get_virtual_display_backend,
+            create_virtual_display,
+            destroy_virtual_display,
             get_capabilities,
             get_permissions,
             run_native_setup

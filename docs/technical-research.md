@@ -20,6 +20,13 @@ Implementation direction:
 4. Capture the created virtual display, not the MacBook primary display.
 5. Expose the capability clearly: `available`, `private-api`, `driver-required`, or `unsupported`.
 
+Current implementation:
+
+- `panelink-virtual-display` now exposes a typed backend report plus create/destroy requests for the UI and Tauri shell.
+- On macOS, PaneLink detects BetterDisplay or SimpleDisplay as an external helper path and starts the helper instead of silently faking an extended screen.
+- On non-macOS devices, PaneLink reports that virtual display creation must happen on the Mac source device.
+- The connect/add-screen flow now blocks the "real extra monitor" path when no virtual-display backend is available, so users do not mistake a mirrored frame window for an extended display.
+
 ## Windows Monitor Selection
 
 The Windows receiver must advertise every physical monitor, including size, scale, refresh rate, bounds, primary state, and whether it is available for a PaneLink session.
@@ -58,6 +65,12 @@ Implementation direction:
 3. On macOS, inject through CoreGraphics events after Accessibility permission is granted.
 4. Keep input permission visible and revocable.
 5. Support direct mouse mode and captured pointer mode separately.
+
+Current implementation:
+
+- The fullscreen receiver sends pointer, wheel, and keyboard batches to the source device through `/input-events`.
+- The source control server validates the typed batch and returns an input receipt through the existing `panelink-input` contract.
+- OS-level injection is still a native backend task: the current backend accepts batches but does not yet call SendInput or CGEvent.
 
 ## License Notes
 

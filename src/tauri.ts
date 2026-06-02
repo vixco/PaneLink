@@ -6,6 +6,7 @@ import {
   fallbackPermissions,
   fallbackSession,
   fallbackStreamState,
+  fallbackVirtualDisplayBackend,
 } from './fixtures';
 import type {
   AudioDevice,
@@ -21,6 +22,9 @@ import type {
   SessionSnapshot,
   StartStreamRequest,
   StreamState,
+  VirtualDisplayBackendReport,
+  VirtualDisplayRequest,
+  VirtualDisplaySession,
 } from './types';
 
 const isTauri = '__TAURI_INTERNALS__' in window;
@@ -257,6 +261,44 @@ export function runNativeSetup() {
     actions: [],
     requiresRestart: false,
   });
+}
+
+export function getVirtualDisplayBackend() {
+  return call<VirtualDisplayBackendReport>('get_virtual_display_backend', fallbackVirtualDisplayBackend);
+}
+
+export function createVirtualDisplay(request: VirtualDisplayRequest) {
+  return call<VirtualDisplaySession>(
+    'create_virtual_display',
+    {
+      id: '',
+      active: false,
+      backend: fallbackVirtualDisplayBackend.backend,
+      displayName: request.name || 'PaneLink Virtual Display',
+      width: request.width || 1920,
+      height: request.height || 1080,
+      refreshHz: request.refreshHz || 60,
+      message: fallbackVirtualDisplayBackend.message,
+    },
+    { request },
+  );
+}
+
+export function destroyVirtualDisplay(id: string) {
+  return call<VirtualDisplaySession>(
+    'destroy_virtual_display',
+    {
+      id,
+      active: false,
+      backend: fallbackVirtualDisplayBackend.backend,
+      displayName: 'PaneLink Virtual Display',
+      width: 1920,
+      height: 1080,
+      refreshHz: 60,
+      message: 'Virtual display closed',
+    },
+    { id },
+  );
 }
 
 export function getFrameServerUrl() {

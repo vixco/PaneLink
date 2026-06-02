@@ -11,12 +11,14 @@ import {
   Wifi,
   WifiOff,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import {
   addRemoteScreen,
   closeDisplayWindow,
   connectPeer,
+  createVirtualDisplay,
   disconnectPeer,
+  destroyVirtualDisplay,
   fetchRemoteFrame,
   getCapabilities,
   getDisplayFrameImageUrl,
@@ -24,6 +26,7 @@ import {
   getPermissions,
   getSession,
   getStreamState,
+  getVirtualDisplayBackend,
   listAudioDevices,
   listPeers,
   openDisplayWindow,
@@ -45,6 +48,8 @@ import type {
   RemoteScreen,
   SessionSnapshot,
   StreamState,
+  VirtualDisplayBackendReport,
+  VirtualDisplaySession,
 } from './types';
 import { checkAndInstallUpdate, type UpdateStatus } from './updater';
 
@@ -55,6 +60,7 @@ type AppData = {
   capabilities: Capabilities | null;
   audioDevices: AudioDevice[];
   permissions: PermissionState[];
+  virtualDisplayBackend: VirtualDisplayBackendReport | null;
 };
 
 const qualities: StreamState['quality'][] = ['Low latency', 'Balanced', 'Sharp'];
@@ -112,6 +118,7 @@ function ControlApp() {
     capabilities: null,
     audioDevices: [],
     permissions: [],
+    virtualDisplayBackend: null,
   });
   const [selectedPeerId, setSelectedPeerId] = useState('');
   const [quality, setQuality] = useState<StreamState['quality']>('Low latency');
@@ -125,6 +132,7 @@ function ControlApp() {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ state: 'idle', label: 'Updates ready' });
   const [displayWindow, setDisplayWindow] = useState({ attached: false, message: 'Display window closed' });
   const [setupStatus, setSetupStatus] = useState<NativeSetupState | null>(null);
+  const [virtualDisplay, setVirtualDisplay] = useState<VirtualDisplaySession | null>(null);
 
   useEffect(() => {
     void loadEverything(true);
@@ -153,6 +161,7 @@ function ControlApp() {
   const receiverReady = isStreaming && displayWindow.attached;
   const selectedPeerTrusted = selectedPeer ? trustedPeerIds.includes(selectedPeer.id) || selectedPeer.trusted : false;
   const localPairingCode = data.capabilities?.peerId ? pairingCodeForPeer(data.capabilities.peerId) : 'laden...';
+  const needsMacVirtualDisplay = needsVirtualDisplayForPeer(data.capabilities, selectedPeer);
 
   async function waitForFrameReady(frameUrl: string) {
     let lastFrame: RemoteFrameResponse | null = null;
@@ -177,6 +186,11 @@ function ControlApp() {
   }
 
   async function startStreamAndOpenDisplay(peer: Peer, nextSession: SessionSnapshot) {
+    const virtualDisplayReady = await ensureVirtualDisplayForSession(peer, nextSession);
+    if (!virtualDisplayReady) {
+      return null;
+    }
+
     const nextStream = await startStream({
       peerId: peer.id,
       screenIds: nextSession.screens.map((screen) => screen.id),
@@ -205,6 +219,53 @@ function ControlApp() {
     setDisplayWindow(nextDisplayWindow);
 
     return nextStream;
+  }
+
+  async function ensureVirtualDisplayForSession(peer: Peer, nextSession: SessionSnapshot) {
+    if (!needsVirtualDisplayForPeer(data.capabilities, peer)) {
+      return true;
+    }
+
+    const backend = data.virtualDisplayBackend ?? await getVirtualDisplayBackend();
+    setData((current) => ({ ...current, virtualDisplayBackend: backend }));
+
+    if (!backend.available) {
+      const message = backend.message || 'Mac virtual display backend ontbreekt.';
+      setVirtualDisplay(null);
+      setSetupStatus({
+        started: false,
+        platform: data.capabilities?.platform ?? 'macos',
+        message,
+        actions: backend.actions.length ? backend.actions : ['Installeer een macOS virtual-display helper'],
+        requiresRestart: false,
+      });
+      setDisplayWindow({ attached: false, message });
+      return false;
+    }
+
+    const targetMode = modeFromScreen(nextSession.screens[nextSession.screens.length - 1]);
+    const session = await createVirtualDisplay({
+      name: `PaneLink ${peer.name}`,
+      width: targetMode.width,
+      height: targetMode.height,
+      refreshHz: targetMode.refreshHz,
+    });
+    setVirtualDisplay(session);
+
+    if (!session.active) {
+      const message = session.message || 'PaneLink kon geen echte virtuele Mac-monitor starten.';
+      setSetupStatus({
+        started: false,
+        platform: data.capabilities?.platform ?? 'macos',
+        message,
+        actions: backend.actions,
+        requiresRestart: false,
+      });
+      setDisplayWindow({ attached: false, message });
+      return false;
+    }
+
+    return true;
   }
 
   async function openDisplayForPeer(peer: Peer, screenCount: number) {
@@ -237,16 +298,17 @@ function ControlApp() {
   async function loadEverything(scan = false) {
     setIsScanning(scan);
     try {
-      const [peers, session, stream, capabilities, audioDevices, permissions] = await Promise.all([
+      const [peers, session, stream, capabilities, audioDevices, permissions, virtualDisplayBackend] = await Promise.all([
         scan ? scanPeers() : listPeers(),
         getSession(),
         getStreamState(),
         getCapabilities(),
         listAudioDevices(),
         getPermissions(),
+        getVirtualDisplayBackend(),
       ]);
 
-      setData({ peers, session, stream, capabilities, audioDevices, permissions });
+      setData({ peers, session, stream, capabilities, audioDevices, permissions, virtualDisplayBackend });
       setSelectedPeerId((current) => session.activePeerId ?? (current || peers[0]?.id || ''));
     } finally {
       setIsScanning(false);
@@ -268,6 +330,10 @@ function ControlApp() {
         const nextStream = await stopStream();
         const nextSession = await disconnectPeer();
         const nextDisplayWindow = await closeDisplayWindow();
+        if (virtualDisplay?.active) {
+          const closedVirtualDisplay = await destroyVirtualDisplay(virtualDisplay.id);
+          setVirtualDisplay(closedVirtualDisplay);
+        }
         setDisplayWindow(nextDisplayWindow);
         setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
         return;
@@ -282,7 +348,7 @@ function ControlApp() {
 
       const nextSession = await connectPeer(selectedPeer.id);
       const nextStream = await startStreamAndOpenDisplay(selectedPeer, nextSession);
-      setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
+      setData((current) => ({ ...current, session: nextSession, stream: nextStream ?? current.stream }));
     } finally {
       setIsBusy(false);
     }
@@ -295,7 +361,7 @@ function ControlApp() {
     try {
       const nextSession = await addRemoteScreen(selectedPeer.id);
       const nextStream = await startStreamAndOpenDisplay(selectedPeer, nextSession);
-      setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
+      setData((current) => ({ ...current, session: nextSession, stream: nextStream ?? current.stream }));
     } finally {
       setIsBusy(false);
     }
@@ -308,7 +374,7 @@ function ControlApp() {
     try {
       const nextSession = await removeRemoteScreen(screenId);
       const nextStream = selectedPeer ? await startStreamAndOpenDisplay(selectedPeer, nextSession) : data.stream;
-      setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
+      setData((current) => ({ ...current, session: nextSession, stream: nextStream ?? current.stream }));
     } finally {
       setIsBusy(false);
     }
@@ -365,7 +431,7 @@ function ControlApp() {
     try {
       const nextSession = await connectPeer(selectedPeer.id);
       const nextStream = await startStreamAndOpenDisplay(selectedPeer, nextSession);
-      setData((current) => ({ ...current, session: nextSession, stream: nextStream }));
+      setData((current) => ({ ...current, session: nextSession, stream: nextStream ?? current.stream }));
     } finally {
       setIsBusy(false);
     }
@@ -376,6 +442,44 @@ function ControlApp() {
     try {
       const nextSetupStatus = await runNativeSetup();
       setSetupStatus(nextSetupStatus);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function handleCreateVirtualDisplay() {
+    if (!selectedPeer) return;
+
+    setIsBusy(true);
+    try {
+      const backend = await getVirtualDisplayBackend();
+      setData((current) => ({ ...current, virtualDisplayBackend: backend }));
+      if (!backend.available) {
+        setSetupStatus({
+          started: false,
+          platform: data.capabilities?.platform ?? 'unknown',
+          message: backend.message,
+          actions: backend.actions,
+          requiresRestart: false,
+        });
+        return;
+      }
+
+      const targetMode = modeFromScreen(screens[screens.length - 1]);
+      const session = await createVirtualDisplay({
+        name: `PaneLink ${selectedPeer.name}`,
+        width: targetMode.width,
+        height: targetMode.height,
+        refreshHz: targetMode.refreshHz,
+      });
+      setVirtualDisplay(session);
+      setSetupStatus({
+        started: session.active,
+        platform: data.capabilities?.platform ?? 'unknown',
+        message: session.message,
+        actions: backend.actions,
+        requiresRestart: false,
+      });
     } finally {
       setIsBusy(false);
     }
@@ -588,6 +692,20 @@ function ControlApp() {
 
         <div className="detail-panel">
           <div className="panel-title">
+            <Monitor size={18} />
+            <h2>Virtual display</h2>
+          </div>
+          <Metric label="Backend" value={data.virtualDisplayBackend?.backend ?? 'laden...'} />
+          <Metric label="State" value={virtualDisplay?.active ? 'active' : data.virtualDisplayBackend?.state ?? 'laden...'} />
+          <button className="secondary-action" disabled={isBusy || !selectedPeer || !needsMacVirtualDisplay} onClick={handleCreateVirtualDisplay}>
+            {isBusy ? <Loader2 className="spin" size={16} /> : <Plus size={16} />}
+            Add Mac monitor
+          </button>
+          <small className="muted">{virtualDisplay?.message ?? data.virtualDisplayBackend?.message ?? 'Virtual display status wordt geladen.'}</small>
+        </div>
+
+        <div className="detail-panel">
+          <div className="panel-title">
             <Volume2 size={18} />
             <h2>Audio</h2>
           </div>
@@ -633,6 +751,7 @@ function DisplayWindow() {
   const [frameError, setFrameError] = useState('');
   const [isFullscreen, setIsFullscreen] = useState(false);
   const diagnosticInFlight = useRef(false);
+  const inputSequence = useRef(0);
   const screenCount = Math.max(1, Math.min(Number(config.screenCount || 1), 3));
   const screens = Array.from({ length: screenCount }, (_, index) => index + 1);
   const hasLiveFrame = Boolean(frameSrc && !frameError);
@@ -727,11 +846,69 @@ function DisplayWindow() {
     }
   }
 
+  function sendInputEvents(events: Array<Record<string, unknown>>) {
+    const inputUrl = remoteControlUrlFromFrameUrl(config.peerAddress, '/input-events');
+    if (!inputUrl || events.length === 0) return;
+
+    inputSequence.current += 1;
+    const batch = {
+      batchId: `display-${Date.now()}-${inputSequence.current}`,
+      sequence: inputSequence.current,
+      sourcePeerId: config.peerId,
+      events,
+    };
+
+    void fetch(inputUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(batch),
+      cache: 'no-store',
+    }).catch((error) => {
+      setFrameError(error instanceof Error ? error.message : String(error));
+    });
+  }
+
+  function pointerPosition(event: ReactPointerEvent<HTMLElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+      y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+    };
+  }
+
   return (
-    <main className="display-window-shell">
+    <main
+      className="display-window-shell"
+      onKeyDown={(event) => {
+        if (!event.repeat) {
+          sendInputEvents([keyInputEvent(event, true)]);
+        }
+      }}
+      onKeyUp={(event) => sendInputEvents([keyInputEvent(event, false)])}
+      tabIndex={0}
+    >
       <section className={`display-window-grid screen-count-${screenCount}`}>
         {screens.map((screen) => (
-          <div className="display-window-screen" key={screen}>
+          <div
+            className="display-window-screen"
+            key={screen}
+            onPointerDown={(event) => {
+              (event.currentTarget.closest('.display-window-shell') as HTMLElement | null)?.focus();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              sendInputEvents([
+                { type: 'pointerMove', ...pointerPosition(event) },
+                { type: 'pointerButton', button: pointerButtonName(event.button), pressed: true },
+              ]);
+            }}
+            onPointerMove={(event) => sendInputEvents([{ type: 'pointerMove', ...pointerPosition(event) }])}
+            onPointerUp={(event) => {
+              sendInputEvents([
+                { type: 'pointerMove', ...pointerPosition(event) },
+                { type: 'pointerButton', button: pointerButtonName(event.button), pressed: false },
+              ]);
+            }}
+            onWheel={(event) => sendInputEvents([{ type: 'pointerWheel', deltaX: event.deltaX, deltaY: event.deltaY }])}
+          >
             {frameSrc && (
               <img
                 alt={`PaneLink screen ${screen}`}
@@ -859,6 +1036,69 @@ function frameUrlForPeer(peer: Peer) {
     : address.split(':')[0] || address;
 
   return `http://${host}:48171/frame`;
+}
+
+function needsVirtualDisplayForPeer(capabilities: Capabilities | null, peer: Peer | undefined) {
+  return capabilities?.platform.toLowerCase() === 'macos' && peer?.os === 'Windows';
+}
+
+function modeFromScreen(screen: RemoteScreen | undefined) {
+  const resolution = screen?.fittedResolution || screen?.nativeResolution || '';
+  const size = resolution.match(/(\d+)\s*x\s*(\d+)/i);
+  const refresh = resolution.match(/@\s*(\d+)/);
+
+  return {
+    width: Number(size?.[1] ?? 1920),
+    height: Number(size?.[2] ?? 1080),
+    refreshHz: Number(refresh?.[1] ?? 60),
+  };
+}
+
+function pointerButtonName(button: number) {
+  switch (button) {
+    case 0:
+      return 'primary';
+    case 1:
+      return 'auxiliary';
+    case 2:
+      return 'secondary';
+    case 3:
+      return 'back';
+    case 4:
+      return 'forward';
+    default:
+      return { other: String(button) };
+  }
+}
+
+function keyInputEvent(event: ReactKeyboardEvent<HTMLElement>, pressed: boolean) {
+  return {
+    type: 'key',
+    code: {
+      physical: event.code,
+      logical: event.key.length === 1 ? event.key : null,
+    },
+    pressed,
+    modifiers: {
+      shift: event.shiftKey,
+      control: event.ctrlKey,
+      alt: event.altKey,
+      meta: event.metaKey,
+    },
+  };
+}
+
+function remoteControlUrlFromFrameUrl(frameUrl: string, path: string) {
+  try {
+    const url = new URL(frameUrl);
+    url.port = '48170';
+    url.pathname = path;
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return '';
+  }
 }
 
 export default App;
