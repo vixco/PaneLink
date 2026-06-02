@@ -318,10 +318,7 @@ fn fetch_raw_http_bytes(
         .write_all(request.as_bytes())
         .map_err(|error| format!("Could not request remote frame: {error}"))?;
 
-    let mut bytes = Vec::new();
-    stream
-        .take(max_bytes)
-        .read_to_end(&mut bytes)
+    let bytes = read_http_response(&mut stream, max_bytes as usize)
         .map_err(|error| format!("Could not read remote frame: {error}"))?;
 
     parse_raw_http_response(&bytes)
@@ -351,13 +348,107 @@ fn fetch_http_text(url: &str, timeout: Duration) -> Result<HttpTextResponse, Str
         .write_all(request.as_bytes())
         .map_err(|error| format!("Could not request receiver display: {error}"))?;
 
-    let mut bytes = Vec::new();
-    stream
-        .take(128 * 1024)
-        .read_to_end(&mut bytes)
+    let bytes = read_http_response(&mut stream, 128 * 1024)
         .map_err(|error| format!("Could not read receiver display response: {error}"))?;
 
     parse_http_text_response(&bytes)
+}
+
+fn read_http_response(stream: &mut TcpStream, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 16 * 1024];
+
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                bytes.extend_from_slice(&buffer[..read]);
+                if bytes.len() > max_bytes {
+                    return Err(format!("HTTP response exceeded {max_bytes} bytes"));
+                }
+                if http_response_complete(&bytes) {
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+                return Err(error.to_string());
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+
+    Ok(bytes)
+}
+
+fn http_response_complete(bytes: &[u8]) -> bool {
+    let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let header_text = String::from_utf8_lossy(&bytes[..header_end]);
+    let headers = header_text
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_string(), value.trim().to_string()))
+        })
+        .collect::<Vec<_>>();
+    let body = &bytes[header_end + 4..];
+
+    if header_value(&headers, "transfer-encoding")
+        .unwrap_or_default()
+        .split(',')
+        .any(|value| value.trim().eq_ignore_ascii_case("chunked"))
+    {
+        return chunked_body_complete(body);
+    }
+
+    header_value(&headers, "content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|length| body.len() >= length)
+}
+
+fn chunked_body_complete(bytes: &[u8]) -> bool {
+    let mut index = 0;
+
+    loop {
+        let Some(line_end) = bytes[index..]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .map(|position| index + position)
+        else {
+            return false;
+        };
+        let size_text = String::from_utf8_lossy(&bytes[index..line_end]);
+        let size_part = size_text.split(';').next().unwrap_or_default().trim();
+        let Ok(size) = usize::from_str_radix(size_part, 16) else {
+            return false;
+        };
+        index = line_end + 2;
+
+        if size == 0 {
+            return bytes.len() >= index + 2;
+        }
+
+        let Some(chunk_end) = index.checked_add(size) else {
+            return false;
+        };
+        if bytes.len() < chunk_end + 2 {
+            return false;
+        }
+        if &bytes[chunk_end..chunk_end + 2] != b"\r\n" {
+            return false;
+        }
+        index = chunk_end + 2;
+    }
 }
 
 fn parse_http_url(url: &str) -> Result<HttpTarget, String> {
@@ -840,6 +931,26 @@ mod tests {
         let response = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nTransfer-Encoding: chunked\r\n\r\n8\r\n\x89PNG\r\n";
 
         assert!(parse_raw_http_response(response).is_err());
+    }
+
+    #[test]
+    fn http_response_complete_accepts_content_length_body() {
+        assert!(http_response_complete(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
+        ));
+        assert!(!http_response_complete(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe"
+        ));
+    }
+
+    #[test]
+    fn http_response_complete_accepts_finished_chunked_body() {
+        assert!(http_response_complete(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+        ));
+        assert!(!http_response_complete(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n"
+        ));
     }
 }
 

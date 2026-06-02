@@ -630,6 +630,7 @@ function DisplayWindow() {
   const diagnosticInFlight = useRef(false);
   const screenCount = Math.max(1, Math.min(Number(config.screenCount || 1), 3));
   const screens = Array.from({ length: screenCount }, (_, index) => index + 1);
+  const hasLiveFrame = Boolean(frameSrc && !frameError);
 
   useEffect(() => {
     const refreshConfig = () => setConfig(readDisplayWindowConfig());
@@ -742,22 +743,26 @@ function DisplayWindow() {
                 <small>{frameError || config.peerAddress || 'Geen frame URL'}</small>
               </div>
             )}
-            <div className="display-window-label">
-              <span>Screen {screen}</span>
-              <small>{frameSrc && !frameError ? 'Live via native fetch' : config.peerAddress ? 'Frame fetch actief' : 'Geen frame URL'}</small>
-            </div>
+            {!hasLiveFrame && (
+              <div className="display-window-label">
+                <span>Screen {screen}</span>
+                <small>{config.peerAddress ? 'Frame fetch actief' : 'Geen frame URL'}</small>
+              </div>
+            )}
           </div>
         ))}
       </section>
-      <button className="display-fullscreen-action" onClick={handleToggleFullscreen}>
+      <button className={hasLiveFrame ? 'display-fullscreen-action live' : 'display-fullscreen-action'} onClick={handleToggleFullscreen}>
         {isFullscreen ? 'Venster' : 'Fullscreen'}
       </button>
-      <div className="display-window-status">
-        <Monitor size={34} />
-        <strong>{frameError ? 'Frame nog niet bereikbaar' : lastFrameAt ? `Live frame ${lastFrameAt}` : 'Wachten op eerste frame'}</strong>
-        <span>{config.peerId} - {config.quality}</span>
-        <small>{frameError || config.peerAddress || 'Geen frame URL ontvangen'}</small>
-      </div>
+      {!hasLiveFrame && (
+        <div className="display-window-status">
+          <Monitor size={34} />
+          <strong>{frameError ? 'Frame nog niet bereikbaar' : lastFrameAt ? `Live frame ${lastFrameAt}` : 'Wachten op eerste frame'}</strong>
+          <span>{config.peerId} - {config.quality}</span>
+          <small>{frameError || config.peerAddress || 'Geen frame URL ontvangen'}</small>
+        </div>
+      )}
     </main>
   );
 }
