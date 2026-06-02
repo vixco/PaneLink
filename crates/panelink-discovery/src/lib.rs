@@ -229,16 +229,12 @@ impl DiscoveryService {
         while started_at.elapsed() < timeout {
             match socket.recv_from(&mut buffer) {
                 Ok((size, from)) => {
-                    if let Some(mut advertisement) = decode_advertisement(&buffer[..size]) {
+                    if let Some(advertisement) = decode_advertisement(&buffer[..size]) {
                         if advertisement.peer_id == local.peer_id {
                             continue;
                         }
 
-                        if is_unspecified_or_loopback(&advertisement.address) {
-                            advertisement.address = from.ip().to_string();
-                        }
-
-                        self.ingest_peer(advertisement);
+                        self.ingest_peer(advertisement_from_socket_source(advertisement, from));
                         let _ = socket.send_to(&packet, from);
                     }
                 }
@@ -333,6 +329,19 @@ fn decode_advertisement(packet: &[u8]) -> Option<AdvertisementPayload> {
 fn normalize_advertisement(mut advertisement: AdvertisementPayload) -> AdvertisementPayload {
     if is_unspecified_or_loopback(&advertisement.address) {
         advertisement.address = "0.0.0.0".into();
+    }
+
+    advertisement
+}
+
+fn advertisement_from_socket_source(
+    mut advertisement: AdvertisementPayload,
+    from: std::net::SocketAddr,
+) -> AdvertisementPayload {
+    let source_ip = from.ip().to_string();
+
+    if !is_unspecified_or_loopback(&source_ip) {
+        advertisement.address = source_ip;
     }
 
     advertisement
@@ -463,5 +472,21 @@ mod tests {
         let targets = discovery_targets(DEFAULT_PORT);
 
         assert!(targets.contains(&SocketAddrV4::new(Ipv4Addr::BROADCAST, DEFAULT_PORT)));
+    }
+
+    #[test]
+    fn socket_source_ip_overrides_advertised_vpn_address() {
+        let advertisement = AdvertisementPayload {
+            address: "10.14.0.2".into(),
+            ..advertisement("peer-a", "Desk")
+        };
+        let from = std::net::SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::new(192, 168, 1, 6),
+            DEFAULT_PORT,
+        ));
+
+        let normalized = advertisement_from_socket_source(advertisement, from);
+
+        assert_eq!(normalized.address, "192.168.1.6");
     }
 }
