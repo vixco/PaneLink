@@ -39,6 +39,7 @@ struct RemoteFrameResponse {
 struct RawHttpResponse {
     status_code: u16,
     content_type: String,
+    transfer_encoding: String,
     body: Vec<u8>,
 }
 
@@ -452,19 +453,73 @@ fn parse_raw_http_response(bytes: &[u8]) -> Result<RawHttpResponse, String> {
         .nth(1)
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(0);
-    let content_type = lines
-        .find_map(|line| {
+    let headers = lines
+        .filter_map(|line| {
             let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-type")
-                .then(|| value.trim().to_string())
+            Some((name.trim().to_string(), value.trim().to_string()))
         })
-        .unwrap_or_default();
+        .collect::<Vec<_>>();
+    let content_type = header_value(&headers, "content-type").unwrap_or_default();
+    let transfer_encoding = header_value(&headers, "transfer-encoding").unwrap_or_default();
+    let body = if transfer_encoding
+        .split(',')
+        .any(|value| value.trim().eq_ignore_ascii_case("chunked"))
+    {
+        decode_chunked_body(body)?
+    } else {
+        body.to_vec()
+    };
 
     Ok(RawHttpResponse {
         status_code,
         content_type,
-        body: body.to_vec(),
+        transfer_encoding,
+        body,
     })
+}
+
+fn header_value(headers: &[(String, String)], name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
+}
+
+fn decode_chunked_body(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoded = Vec::new();
+    let mut index = 0;
+
+    loop {
+        let line_end = bytes[index..]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .map(|position| index + position)
+            .ok_or_else(|| "Chunked frame response ended before a chunk header".to_string())?;
+        let size_text = String::from_utf8_lossy(&bytes[index..line_end]);
+        let size_part = size_text.split(';').next().unwrap_or_default().trim();
+        let size = usize::from_str_radix(size_part, 16)
+            .map_err(|error| format!("Invalid chunk size in frame response: {error}"))?;
+        index = line_end + 2;
+
+        if size == 0 {
+            break;
+        }
+
+        let chunk_end = index
+            .checked_add(size)
+            .ok_or_else(|| "Chunked frame response size overflowed".to_string())?;
+        if bytes.len() < chunk_end + 2 {
+            return Err("Chunked frame response ended before chunk data completed".into());
+        }
+        if &bytes[chunk_end..chunk_end + 2] != b"\r\n" {
+            return Err("Chunked frame response chunk was not CRLF terminated".into());
+        }
+
+        decoded.extend_from_slice(&bytes[index..chunk_end]);
+        index = chunk_end + 2;
+    }
+
+    Ok(decoded)
 }
 
 fn remote_frame_response_from_raw(
@@ -495,12 +550,17 @@ fn remote_frame_response_from_raw(
         String::from_utf8_lossy(&response.body).trim().to_string()
     } else {
         format!(
-            "Remote frame was not a valid PNG (HTTP {}, content-type {}, {} bytes)",
+            "Remote frame was not a valid PNG (HTTP {}, content-type {}, transfer {}, {} bytes)",
             response.status_code,
             if response.content_type.is_empty() {
                 "unknown"
             } else {
                 &response.content_type
+            },
+            if response.transfer_encoding.is_empty() {
+                "none"
+            } else {
+                &response.transfer_encoding
             },
             response.body.len()
         )
@@ -609,12 +669,17 @@ fn proxied_frame_response(frame_url: &str) -> Response<Cursor<Vec<u8>>> {
         }
         Ok(response) => text_control_response(
             format!(
-                "Remote frame was not a valid PNG (HTTP {}, content-type {}, {} bytes)",
+                "Remote frame was not a valid PNG (HTTP {}, content-type {}, transfer {}, {} bytes)",
                 response.status_code,
                 if response.content_type.is_empty() {
                     "unknown"
                 } else {
                     &response.content_type
+                },
+                if response.transfer_encoding.is_empty() {
+                    "none"
+                } else {
+                    &response.transfer_encoding
                 },
                 response.body.len()
             ),
@@ -756,6 +821,25 @@ mod tests {
         );
         assert_eq!(request.screen_count, Some(2));
         assert_eq!(request.quality.as_deref(), Some("Low latency"));
+    }
+
+    #[test]
+    fn raw_http_response_decodes_chunked_png_frames() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nTransfer-Encoding: chunked\r\n\r\n8\r\n\x89PNG\r\n\x1A\n\r\n1\r\nX\r\n0\r\n\r\n";
+        let parsed = parse_raw_http_response(response).expect("chunked frame should parse");
+
+        assert_eq!(parsed.status_code, 200);
+        assert_eq!(parsed.content_type, "image/png");
+        assert_eq!(parsed.transfer_encoding, "chunked");
+        assert!(parsed.body.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(parsed.body, b"\x89PNG\r\n\x1a\nX");
+    }
+
+    #[test]
+    fn chunked_decoder_rejects_truncated_chunks() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nTransfer-Encoding: chunked\r\n\r\n8\r\n\x89PNG\r\n";
+
+        assert!(parse_raw_http_response(response).is_err());
     }
 }
 

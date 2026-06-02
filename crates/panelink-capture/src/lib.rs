@@ -96,8 +96,13 @@ fn start_capture_loop(cache: SharedFrameCache) -> Result<(), String> {
                 }
                 Err(error) => {
                     let mut state = cache.write().expect("frame cache should not be poisoned");
+                    let permission_related = is_permission_related_capture_error(&error);
                     state.error = Some(error);
-                    Duration::from_millis(1000)
+                    if permission_related {
+                        Duration::from_secs(30)
+                    } else {
+                        Duration::from_millis(1000)
+                    }
                 }
             };
 
@@ -105,6 +110,21 @@ fn start_capture_loop(cache: SharedFrameCache) -> Result<(), String> {
         })
         .map(|_| ())
         .map_err(|error| format!("Frame capture loop could not start: {error}"))
+}
+
+fn is_permission_related_capture_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        "permission",
+        "privacy",
+        "screen recording",
+        "authorized",
+        "authorised",
+        "denied",
+        "record",
+    ]
+    .iter()
+    .any(|needle| error.contains(needle))
 }
 
 pub fn capture_primary_png() -> Result<Vec<u8>, String> {
@@ -237,5 +257,15 @@ mod tests {
 
         assert!(frame.starts_with(b"\x89PNG\r\n\x1a\n"));
         assert!(frame.len() > 1024);
+    }
+
+    #[test]
+    fn detects_permission_related_capture_errors() {
+        assert!(is_permission_related_capture_error(
+            "Could not capture monitor: Screen Recording permission denied"
+        ));
+        assert!(!is_permission_related_capture_error(
+            "Could not encode captured frame: invalid data"
+        ));
     }
 }
