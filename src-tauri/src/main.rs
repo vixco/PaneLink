@@ -92,8 +92,7 @@ fn get_frame_server_lan_url() -> Result<String, String> {
     let host = host_from_authority(&advertisement.address)
         .filter(|host| host != "0.0.0.0" && host != "127.0.0.1")
         .ok_or_else(|| {
-            "Could not determine this device's LAN address for remote display streaming"
-                .to_string()
+            "Could not determine this device's LAN address for remote display streaming".to_string()
         })?;
 
     Ok(format!("http://{host}:{port}/frame"))
@@ -517,10 +516,15 @@ fn run_remote_control_server(app: AppHandle, server: Server) {
             text_control_response("", StatusCode(204))
         } else if matches!(method.as_str(), "GET" | "POST") && path == "/open-display" {
             match display_request_from_url(&url) {
-                Ok(display_request) => match open_display_window_for_request(app.clone(), display_request) {
-                    Ok(()) => text_control_response("Display window opened on receiver", StatusCode(200)),
-                    Err(error) => text_control_response(error, StatusCode(500)),
-                },
+                Ok(display_request) => {
+                    match open_display_window_for_request(app.clone(), display_request) {
+                        Ok(()) => text_control_response(
+                            "Display window opened on receiver",
+                            StatusCode(200),
+                        ),
+                        Err(error) => text_control_response(error, StatusCode(500)),
+                    }
+                }
                 Err(error) => text_control_response(error, StatusCode(400)),
             }
         } else if path == "/health" {
