@@ -3045,7 +3045,7 @@ dependencies = [
 
 [[package]]
 name = "panelink"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "base64 0.22.1",
  "panelink-audio",

@@ -222,7 +222,7 @@ fn open_display_window_for_request(
     let screen_count = request.screen_count.unwrap_or(1).clamp(1, 3);
     let initial_width = if screen_count > 1 { 1440.0 } else { 1280.0 };
     let display_url = format!(
-        "/?window=display&peerId={}&peerAddress={}&screens={screen_count}&quality={}",
+        "index.html?window=display&peerId={}&peerAddress={}&screens={screen_count}&quality={}",
         percent_encode(&request.peer_id.unwrap_or_else(|| "unknown".into())),
         percent_encode(&request.peer_address.unwrap_or_default()),
         percent_encode(&request.quality.unwrap_or_else(|| "Low latency".into()))
@@ -939,9 +939,6 @@ fn run_native_setup() -> NativeSetupState {
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
-            if let Err(error) = panelink_capture::start_frame_server() {
-                eprintln!("PaneLink frame server startup failed: {error}");
-            }
             if let Err(error) = start_remote_control_server(app.handle().clone()) {
                 eprintln!("PaneLink remote control startup failed: {error}");
             }

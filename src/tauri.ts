@@ -202,7 +202,7 @@ export function openDisplayWindow(request: DisplayWindowRequest) {
       screens: String(Math.max(1, Math.min(request.screenCount, 3))),
       quality: request.quality,
     });
-    browserDisplayWindow = window.open(`/display.html?${params.toString()}`, 'panelink-display', 'popup,width=1280,height=720');
+    browserDisplayWindow = window.open(`/?${params.toString()}`, 'panelink-display', 'popup,width=1280,height=720');
 
     return Promise.resolve<DisplayWindowState>({
       attached: Boolean(browserDisplayWindow),

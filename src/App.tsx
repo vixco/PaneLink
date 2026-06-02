@@ -41,6 +41,7 @@ import type {
   NativeSetupState,
   Peer,
   PermissionState,
+  RemoteFrameResponse,
   RemoteScreen,
   SessionSnapshot,
   StreamState,
@@ -148,6 +149,28 @@ function ControlApp() {
   const selectedPeerTrusted = selectedPeer ? trustedPeerIds.includes(selectedPeer.id) || selectedPeer.trusted : false;
   const localPairingCode = data.capabilities?.peerId ? pairingCodeForPeer(data.capabilities.peerId) : 'laden...';
 
+  async function waitForFrameReady(frameUrl: string) {
+    let lastFrame: RemoteFrameResponse | null = null;
+
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const frame = await fetchRemoteFrame(frameUrl);
+      if (frame.ok && frame.dataUrl) {
+        return frame;
+      }
+
+      lastFrame = frame;
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+    }
+
+    return lastFrame ?? {
+      ok: false,
+      statusCode: 0,
+      contentType: '',
+      dataUrl: null,
+      message: 'Mac capture server gaf nog geen frame terug',
+    };
+  }
+
   async function startStreamAndOpenDisplay(peer: Peer, nextSession: SessionSnapshot) {
     const nextStream = await startStream({
       peerId: peer.id,
@@ -157,7 +180,13 @@ function ControlApp() {
 
     if (!displayPipelineReady) {
       await closeDisplayWindow();
-      const nextSetupStatus = await runNativeSetup();
+      const nextSetupStatus = {
+        started: false,
+        platform: data.capabilities?.platform ?? 'unknown',
+        message: 'Native capture is nog niet beschikbaar. Open native setup handmatig en probeer daarna opnieuw.',
+        actions: ['Native setup openen'],
+        requiresRestart: false,
+      };
       setSetupStatus(nextSetupStatus);
       setDisplayWindow({
         attached: false,
@@ -177,14 +206,23 @@ function ControlApp() {
     const localPlatform = data.capabilities?.platform.toLowerCase() ?? '';
     const localPeerId = data.capabilities?.peerId ?? 'local-source';
     const shouldOpenOnReceiver = localPlatform === 'macos' && peer.os === 'Windows';
+    const peerAddress = shouldOpenOnReceiver ? await getFrameServerLanUrl() : frameUrlForPeer(peer);
     const request: DisplayWindowRequest = {
       peerId: shouldOpenOnReceiver ? localPeerId : peer.id,
-      peerAddress: shouldOpenOnReceiver ? await getFrameServerLanUrl() : frameUrlForPeer(peer),
+      peerAddress,
       screenCount: Math.max(screenCount, 1),
       quality,
     };
 
     if (shouldOpenOnReceiver) {
+      const frame = await waitForFrameReady(peerAddress);
+      if (!frame.ok) {
+        return {
+          attached: false,
+          message: `Mac stuurt nog geen geldig beeld: ${frame.message || `HTTP ${frame.statusCode}`}`,
+        };
+      }
+
       return openRemoteDisplayWindow(peer.address, request);
     }
 
@@ -328,6 +366,16 @@ function ControlApp() {
     }
   }
 
+  async function handleRunNativeSetup() {
+    setIsBusy(true);
+    try {
+      const nextSetupStatus = await runNativeSetup();
+      setSetupStatus(nextSetupStatus);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="app-header">
@@ -458,7 +506,7 @@ function ControlApp() {
             <div className="preview-copy">
               <Monitor size={30} />
               <strong>
-                {receiverReady ? 'Receiver window open' : isStreaming ? 'Setup nodig' : isConnected ? 'Stream starten...' : 'Wacht op verbinding'}
+                {receiverReady ? 'Receiver window open' : isStreaming ? 'Receiver openen' : isConnected ? 'Stream starten...' : 'Wacht op verbinding'}
               </strong>
               <span>
                 {receiverReady && displayPipelineReady
@@ -466,7 +514,7 @@ function ControlApp() {
                   : receiverReady
                     ? 'Receiver staat open. Echte schermpixels wachten nog op native capture en virtual display driver.'
                     : isStreaming
-                      ? setupStatus?.message ?? 'PaneLink start automatisch de native setup voordat er een display window wordt geopend.'
+                      ? displayWindow.message || setupStatus?.message || 'PaneLink wacht op een geldig frame voordat de receiver wordt geopend.'
                       : isConnected
                         ? 'De stream-engine wordt gestart.'
                         : 'Klik links op verbinden.'}
@@ -550,6 +598,10 @@ function ControlApp() {
           <button className="secondary-action update-action" disabled={isCheckingUpdate} onClick={handleCheckForUpdate}>
             {isCheckingUpdate ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
             Check for update
+          </button>
+          <button className="secondary-action update-action" disabled={isBusy} onClick={handleRunNativeSetup}>
+            {isBusy ? <Loader2 className="spin" size={16} /> : <Settings size={16} />}
+            Native setup
           </button>
           <small className="muted">Pairing code: {localPairingCode}</small>
           <small className="muted">Update: {updateStatus.label}</small>
