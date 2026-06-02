@@ -406,7 +406,7 @@ mod macos {
 
     unsafe fn arrange_display_right_of_main(display_id: u32) -> Result<(), String> {
         let main_bounds = CGDisplayBounds(CGMainDisplayID());
-        let (x, y) = origin_right_of_rect(display_rect_from_cgrect(main_bounds));
+        let (x, y) = super::origin_right_of_rect(display_rect_from_cgrect(main_bounds));
         configure_display_origin(display_id, x, y)
     }
 
