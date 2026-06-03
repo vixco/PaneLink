@@ -246,6 +246,11 @@ pub fn configure_h264_control_stream(
 }
 
 pub fn respond_h264_stream_request(request: tiny_http::Request) {
+    if request.method().as_str() == "OPTIONS" {
+        let _ = request.respond(empty_response(StatusCode(204)));
+        return;
+    }
+
     match active_h264_config() {
         Ok(config) => {
             let _ = request.respond(h264_stream_response(config));
@@ -418,6 +423,7 @@ fn with_common_headers<R: Read>(response: Response<R>) -> Response<R> {
         .with_header(header("Access-Control-Allow-Origin", "*"))
         .with_header(header("Access-Control-Allow-Methods", "GET, OPTIONS"))
         .with_header(header("Access-Control-Allow-Headers", "*"))
+        .with_header(header("Access-Control-Allow-Private-Network", "true"))
         .with_header(header(
             "Cache-Control",
             "no-store, no-cache, must-revalidate",

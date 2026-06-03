@@ -858,7 +858,8 @@ fn run_remote_control_server(app: AppHandle, server: Server) {
         let method = request.method().as_str().to_string();
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or("/");
-        if method == "GET" && path == panelink_video::H264_STREAM_PATH {
+        if matches!(method.as_str(), "GET" | "OPTIONS") && path == panelink_video::H264_STREAM_PATH
+        {
             panelink_video::respond_h264_stream_request(request);
             continue;
         }
@@ -1149,6 +1150,7 @@ fn text_control_response(text: impl Into<String>, status: StatusCode) -> Respons
         .with_header(header("Access-Control-Allow-Origin", "*"))
         .with_header(header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
         .with_header(header("Access-Control-Allow-Headers", "*"))
+        .with_header(header("Access-Control-Allow-Private-Network", "true"))
 }
 
 fn binary_control_response(
@@ -1162,6 +1164,7 @@ fn binary_control_response(
         .with_header(header("Access-Control-Allow-Origin", "*"))
         .with_header(header("Access-Control-Allow-Methods", "GET, OPTIONS"))
         .with_header(header("Access-Control-Allow-Headers", "*"))
+        .with_header(header("Access-Control-Allow-Private-Network", "true"))
         .with_header(header(
             "Cache-Control",
             "no-store, no-cache, must-revalidate",
@@ -1203,14 +1206,14 @@ mod tests {
     #[test]
     fn display_request_from_url_decodes_remote_display_payload() {
         let request = display_request_from_url(
-            "/open-display?peerId=mac%201&peerAddress=http%3A%2F%2F192.168.1.24%3A48172%2Fh264&controlAddress=http%3A%2F%2F192.168.1.24%3A48170&videoSessionId=video-1&videoTransport=H.264+LAN+stream&videoCodec=H.264+OpenH264&screens=2&quality=Low+latency",
+            "/open-display?peerId=mac%201&peerAddress=http%3A%2F%2F192.168.1.24%3A48170%2Fh264&controlAddress=http%3A%2F%2F192.168.1.24%3A48170&videoSessionId=video-1&videoTransport=H.264+LAN+stream&videoCodec=H.264+OpenH264&screens=2&quality=Low+latency",
         )
         .expect("remote display request should parse");
 
         assert_eq!(request.peer_id.as_deref(), Some("mac 1"));
         assert_eq!(
             request.peer_address.as_deref(),
-            Some("http://192.168.1.24:48172/h264")
+            Some("http://192.168.1.24:48170/h264")
         );
         assert_eq!(
             request.control_address.as_deref(),

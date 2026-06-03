@@ -1172,7 +1172,8 @@ function H264Canvas({
         }
       } catch (error) {
         if (!cancelled) {
-          onError(error instanceof Error ? error.message : String(error));
+          const message = error instanceof Error ? error.message : String(error);
+          onError(`Kan H.264 stream niet openen: ${message} (${endpoint})`);
         }
       }
     }
