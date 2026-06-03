@@ -44,6 +44,7 @@ import {
 import { selectDisplayPipeline } from './display-routing';
 import { framePollDelayMs } from './frame-timing';
 import { createManualPeer } from './manual-peer';
+import { endpointForControlHost, isH264StreamEndpoint } from './video-endpoint';
 import type {
   AudioDevice,
   Capabilities,
@@ -269,12 +270,28 @@ function ControlApp() {
 
     if (displayPipeline.kind === 'frame-fallback') {
       if (shouldUseRemoteMacSource) {
-        await prepareRemoteHostDisplay(controlAddress, {
+        const preparedHost = await prepareRemoteHostDisplay(controlAddress, {
           width: targetMode.width,
           height: targetMode.height,
           refreshHz: 60,
           quality,
         });
+
+        if (preparedHost.h264Stream?.endpoint) {
+          const h264Endpoint = endpointForControlHost(preparedHost.h264Stream.endpoint, controlAddress);
+          const request: DisplayWindowRequest = {
+            peerId: peer.id,
+            peerAddress: h264Endpoint,
+            controlAddress,
+            videoSessionId: `h264-${Date.now()}`,
+            videoTransport: preparedHost.h264Stream.transport,
+            videoCodec: preparedHost.h264Stream.codec,
+            screenCount,
+            quality,
+          };
+
+          return openDisplayWindow(request);
+        }
       }
 
       const frameUrl = shouldUseRemoteMacSource ? frameUrlForPeer(peer) : await getFrameServerLanUrl(peer.address);
@@ -834,6 +851,7 @@ function DisplayWindow() {
   const screenCount = Math.max(1, Math.min(Number(config.screenCount || 1), 3));
   const screens = Array.from({ length: screenCount }, (_, index) => index + 1);
   const isFrameSession = Boolean(config.peerAddress && config.peerAddress.includes('/frame'));
+  const isH264Session = Boolean(config.peerAddress && isH264StreamEndpoint(config.peerAddress));
   const hasVideoSession = Boolean(config.peerAddress && !isFrameSession);
   const hasLiveFrame = Object.values(frameResponses).some((response) => response.ok && response.dataUrl);
 
@@ -990,14 +1008,19 @@ function DisplayWindow() {
             }}
             onWheel={(event) => sendInputEvents([{ type: 'pointerWheel', deltaX: event.deltaX, deltaY: event.deltaY }])}
           >
-            {hasVideoSession && (
-              <video
-                aria-label={`PaneLink remote display ${screen}`}
-                autoPlay
-                className="display-window-frame"
-                muted
-                playsInline
+            {isH264Session && (
+              <H264Canvas
+                endpoint={config.peerAddress}
+                label={`PaneLink remote display ${screen}`}
+                onError={setControlError}
               />
+            )}
+            {hasVideoSession && !isH264Session && (
+              <div className="display-window-placeholder error">
+                <Loader2 className="spin" size={24} />
+                <strong>Video decoder wacht</strong>
+                <small>{config.peerAddress}</small>
+              </div>
             )}
             {isFrameSession && frameResponses[screen]?.dataUrl && (
               <img
@@ -1023,7 +1046,7 @@ function DisplayWindow() {
             {(hasVideoSession || isFrameSession) && (
               <div className="display-window-label">
                 <span>Screen {screen}</span>
-                <small>{config.videoCodec ?? 'H.264 VideoToolbox'} via {config.videoTransport ?? 'WebRTC/RTP'}</small>
+                <small>{config.videoCodec ?? 'H.264 OpenH264'} via {config.videoTransport ?? 'H.264 LAN stream'}</small>
               </div>
             )}
           </div>
@@ -1047,6 +1070,162 @@ function DisplayWindow() {
 function frameUrlForScreen(frameUrl: string, screen: number) {
   const separator = frameUrl.includes('?') ? '&' : '?';
   return `${frameUrl}${separator}screen=${screen}`;
+}
+
+function H264Canvas({
+  endpoint,
+  label,
+  onError,
+}: {
+  endpoint: string;
+  label: string;
+  onError: (message: string) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const abortController = new AbortController();
+    const codecs = window as typeof window & {
+      VideoDecoder?: new (init: { output: (frame: any) => void; error: (error: Error) => void }) => any;
+      EncodedVideoChunk?: new (init: {
+        type: 'key' | 'delta';
+        timestamp: number;
+        duration: number;
+        data: Uint8Array;
+      }) => any;
+    };
+
+    if (!codecs.VideoDecoder || !codecs.EncodedVideoChunk) {
+      onError('WebCodecs is niet beschikbaar in deze Windows viewer.');
+      return () => abortController.abort();
+    }
+
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context) {
+      onError('Canvas decoder kon niet starten.');
+      return () => abortController.abort();
+    }
+
+    const decoder = new codecs.VideoDecoder({
+      output(frame: any) {
+        if (cancelled) {
+          frame.close();
+          return;
+        }
+        canvas.width = frame.displayWidth || frame.codedWidth || canvas.width;
+        canvas.height = frame.displayHeight || frame.codedHeight || canvas.height;
+        context.drawImage(frame, 0, 0, canvas.width, canvas.height);
+        frame.close();
+      },
+      error(error: Error) {
+        onError(`H.264 decoder fout: ${error.message}`);
+      },
+    });
+
+    decoder.configure({
+      codec: 'avc1.42E01F',
+      optimizeForLatency: true,
+    });
+
+    async function stream() {
+      try {
+        const response = await fetch(endpoint, {
+          cache: 'no-store',
+          signal: abortController.signal,
+        });
+        if (!response.ok || !response.body) {
+          throw new Error(`H.264 stream gaf HTTP ${response.status}`);
+        }
+
+        const reader = response.body.getReader();
+        let pending = new Uint8Array(0);
+        let timestamp = 0;
+        const duration = 16_667;
+
+        while (!cancelled) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+
+          pending = concatBytes(pending, value);
+          const result = readH264Packets(pending);
+          pending = result.remaining;
+
+          for (const packet of result.packets) {
+            decoder.decode(
+              new codecs.EncodedVideoChunk({
+                type: isH264KeyPacket(packet) ? 'key' : 'delta',
+                timestamp,
+                duration,
+                data: packet,
+              }),
+            );
+            timestamp += duration;
+          }
+        }
+      } catch (error) {
+        if (!cancelled) {
+          onError(error instanceof Error ? error.message : String(error));
+        }
+      }
+    }
+
+    void stream();
+
+    return () => {
+      cancelled = true;
+      abortController.abort();
+      decoder.close();
+    };
+  }, [endpoint, onError]);
+
+  return <canvas aria-label={label} className="display-window-frame" ref={canvasRef} />;
+}
+
+function concatBytes(left: Uint8Array, right: Uint8Array) {
+  const output = new Uint8Array(left.length + right.length);
+  output.set(left, 0);
+  output.set(right, left.length);
+  return output;
+}
+
+function readH264Packets(buffer: Uint8Array) {
+  const packets: Uint8Array[] = [];
+  let offset = 0;
+
+  while (buffer.length - offset >= 4) {
+    const length = new DataView(buffer.buffer, buffer.byteOffset + offset, 4).getUint32(0, false);
+    if (buffer.length - offset < 4 + length) {
+      break;
+    }
+    packets.push(buffer.slice(offset + 4, offset + 4 + length));
+    offset += 4 + length;
+  }
+
+  return {
+    packets,
+    remaining: buffer.slice(offset),
+  };
+}
+
+function isH264KeyPacket(packet: Uint8Array) {
+  for (let index = 0; index + 3 < packet.length; index += 1) {
+    if (index + 4 < packet.length && packet[index] === 0 && packet[index + 1] === 0 && packet[index + 2] === 0 && packet[index + 3] === 1) {
+      const nalType = packet[index + 4] & 0x1f;
+      if (nalType === 5 || nalType === 7) {
+        return true;
+      }
+    } else if (packet[index] === 0 && packet[index + 1] === 0 && packet[index + 2] === 1) {
+      const nalType = packet[index + 3] & 0x1f;
+      if (nalType === 5 || nalType === 7) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 function DisplayBoot() {
@@ -1110,8 +1289,8 @@ function readDisplayWindowConfig(): DisplayWindowRequest {
         peerAddress: params.get('peerAddress') ?? '',
         controlAddress: params.get('controlAddress') ?? '',
         videoSessionId: params.get('videoSessionId') ?? '',
-        videoTransport: params.get('videoTransport') ?? 'WebRTC/RTP',
-        videoCodec: params.get('videoCodec') ?? 'H.264 VideoToolbox',
+        videoTransport: params.get('videoTransport') ?? 'H.264 LAN stream',
+        videoCodec: params.get('videoCodec') ?? 'H.264 OpenH264',
         screenCount: Number(params.get('screens') ?? 1),
         quality: (params.get('quality') ?? 'Low latency') as StreamState['quality'],
       }
@@ -1139,8 +1318,8 @@ function normalizeDisplayWindowRequest(request: Partial<DisplayWindowRequest>): 
     peerAddress: request.peerAddress ?? '',
     controlAddress: request.controlAddress ?? '',
     videoSessionId: request.videoSessionId ?? '',
-    videoTransport: request.videoTransport ?? 'WebRTC/RTP',
-    videoCodec: request.videoCodec ?? 'H.264 VideoToolbox',
+    videoTransport: request.videoTransport ?? 'H.264 LAN stream',
+    videoCodec: request.videoCodec ?? 'H.264 OpenH264',
     screenCount: Number(request.screenCount ?? 1),
     quality: request.quality ?? 'Low latency',
   };

@@ -64,6 +64,7 @@ struct HostDisplayPrepareRequest {
 struct HostDisplayPrepareResponse {
     ok: bool,
     frame_url: String,
+    h264_stream: Option<panelink_video::H264StreamSession>,
     virtual_display: Option<panelink_virtual_display::VirtualDisplaySession>,
     message: String,
 }
@@ -226,8 +227,13 @@ fn request_receiver_display(
         percent_encode(peer_address),
         percent_encode(request.control_address.as_deref().unwrap_or_default()),
         percent_encode(request.video_session_id.as_deref().unwrap_or_default()),
-        percent_encode(request.video_transport.as_deref().unwrap_or("WebRTC/RTP")),
-        percent_encode(request.video_codec.as_deref().unwrap_or("H.264 VideoToolbox")),
+        percent_encode(
+            request
+                .video_transport
+                .as_deref()
+                .unwrap_or("H.264 LAN stream"),
+        ),
+        percent_encode(request.video_codec.as_deref().unwrap_or("H.264 OpenH264")),
         request.screen_count.unwrap_or(1).clamp(1, 3),
         percent_encode(request.quality.as_deref().unwrap_or("Low latency"))
     );
@@ -310,8 +316,16 @@ fn open_display_window_for_request(
         percent_encode(&request.peer_address.unwrap_or_default()),
         percent_encode(&request.control_address.unwrap_or_default()),
         percent_encode(&request.video_session_id.unwrap_or_default()),
-        percent_encode(&request.video_transport.unwrap_or_else(|| "WebRTC/RTP".into())),
-        percent_encode(&request.video_codec.unwrap_or_else(|| "H.264 VideoToolbox".into())),
+        percent_encode(
+            &request
+                .video_transport
+                .unwrap_or_else(|| "H.264 LAN stream".into()),
+        ),
+        percent_encode(
+            &request
+                .video_codec
+                .unwrap_or_else(|| "H.264 OpenH264".into()),
+        ),
         percent_encode(&request.quality.unwrap_or_else(|| "Low latency".into()))
     );
 
@@ -900,13 +914,31 @@ fn prepare_host_display(
 ) -> Result<HostDisplayPrepareResponse, String> {
     let virtual_display = ensure_host_virtual_display(&request)?;
     let port = panelink_capture::start_frame_server()?;
+    let h264_stream =
+        panelink_video::start_h264_stream_server(panelink_video::H264StreamRequest {
+            width: request.width,
+            height: request.height,
+            target_fps: request.refresh_hz.min(60),
+            target_bitrate_mbps: h264_bitrate_for_quality(&request.quality),
+            quality: request.quality.clone(),
+        })?;
 
     Ok(HostDisplayPrepareResponse {
         ok: true,
         frame_url: format!("http://127.0.0.1:{port}/frame"),
+        h264_stream: Some(h264_stream),
         virtual_display: Some(virtual_display),
-        message: "PaneLink host virtual display is ready and frame server is running.".into(),
+        message: "PaneLink host virtual display is ready and H.264 stream server is running."
+            .into(),
     })
+}
+
+fn h264_bitrate_for_quality(quality: &str) -> u16 {
+    match quality {
+        "Sharp" => 52,
+        "Balanced" => 36,
+        _ => 28,
+    }
 }
 
 fn ensure_host_virtual_display(
@@ -1166,22 +1198,22 @@ mod tests {
     #[test]
     fn display_request_from_url_decodes_remote_display_payload() {
         let request = display_request_from_url(
-            "/open-display?peerId=mac%201&peerAddress=webrtc%2Brtp%3A%2F%2Fwindows%2Fpanelink%2Fvideo-1&controlAddress=http%3A%2F%2F192.168.1.24%3A48170&videoSessionId=video-1&videoTransport=WebRTC%2FRTP&videoCodec=H.264+VideoToolbox&screens=2&quality=Low+latency",
+            "/open-display?peerId=mac%201&peerAddress=http%3A%2F%2F192.168.1.24%3A48172%2Fh264&controlAddress=http%3A%2F%2F192.168.1.24%3A48170&videoSessionId=video-1&videoTransport=H.264+LAN+stream&videoCodec=H.264+OpenH264&screens=2&quality=Low+latency",
         )
         .expect("remote display request should parse");
 
         assert_eq!(request.peer_id.as_deref(), Some("mac 1"));
         assert_eq!(
             request.peer_address.as_deref(),
-            Some("webrtc+rtp://windows/panelink/video-1")
+            Some("http://192.168.1.24:48172/h264")
         );
         assert_eq!(
             request.control_address.as_deref(),
             Some("http://192.168.1.24:48170")
         );
         assert_eq!(request.video_session_id.as_deref(), Some("video-1"));
-        assert_eq!(request.video_transport.as_deref(), Some("WebRTC/RTP"));
-        assert_eq!(request.video_codec.as_deref(), Some("H.264 VideoToolbox"));
+        assert_eq!(request.video_transport.as_deref(), Some("H.264 LAN stream"));
+        assert_eq!(request.video_codec.as_deref(), Some("H.264 OpenH264"));
         assert_eq!(request.screen_count, Some(2));
         assert_eq!(request.quality.as_deref(), Some("Low latency"));
     }
@@ -1341,8 +1373,8 @@ fn get_capabilities() -> Capabilities {
         peer_id: panelink_core::local_peer_id(),
         platform: std::env::consts::OS.into(),
         video_encoders: vec![
-            "H.264 VideoToolbox".into(),
-            "HEVC VideoToolbox".into(),
+            "H.264 OpenH264".into(),
+            "H.264 WebCodecs decode".into(),
             "H.264 hardware decode".into(),
         ],
         transport: vec![

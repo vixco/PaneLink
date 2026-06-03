@@ -41,6 +41,13 @@ pub struct CaptureBackend {
     pub note: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedFrame {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 pub fn current_capture_backend() -> CaptureBackend {
     #[cfg(target_os = "windows")]
     {
@@ -141,6 +148,29 @@ fn is_permission_related_capture_error(error: &str) -> bool {
 }
 
 pub fn capture_primary_png() -> Result<Vec<u8>, String> {
+    let image = capture_primary_image()?;
+    let mut bytes = Cursor::new(Vec::new());
+
+    image
+        .write_to(&mut bytes, ImageFormat::Png)
+        .map_err(|error| format!("Could not encode captured frame: {error}"))?;
+
+    Ok(bytes.into_inner())
+}
+
+pub fn capture_primary_rgba() -> Result<CapturedFrame, String> {
+    let image = capture_primary_image()?;
+    let width = image.width();
+    let height = image.height();
+
+    Ok(CapturedFrame {
+        width,
+        height,
+        rgba: image.into_raw(),
+    })
+}
+
+fn capture_primary_image() -> Result<xcap::image::RgbaImage, String> {
     let monitors = Monitor::all().map_err(|error| format!("Could not list monitors: {error}"))?;
     let descriptors = monitor_descriptors(&monitors);
     let monitor_index = preferred_monitor_index(&descriptors)
@@ -152,13 +182,8 @@ pub fn capture_primary_png() -> Result<Vec<u8>, String> {
     let image = monitor
         .capture_image()
         .map_err(|error| format!("Could not capture monitor: {error}"))?;
-    let mut bytes = Cursor::new(Vec::new());
 
-    image
-        .write_to(&mut bytes, ImageFormat::Png)
-        .map_err(|error| format!("Could not encode captured frame: {error}"))?;
-
-    Ok(bytes.into_inner())
+    Ok(image)
 }
 
 fn monitor_descriptors(monitors: &[Monitor]) -> Vec<MonitorDescriptor> {

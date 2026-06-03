@@ -4,24 +4,27 @@ PaneLink is an open-source LAN desktop app for using a Windows desk setup with a
 
 Current MVP focus: **Mac host -> Windows client**.
 
-The first usable version streams the Mac screen as a local PNG frame stream to a fullscreen Windows viewer and forwards basic mouse and keyboard events back to the Mac over LAN. It does not install virtual display drivers yet, and it does not pretend to be a finished Parsec replacement.
+The current MVP creates a macOS PaneLink virtual display, streams that display to a fullscreen Windows viewer over a local H.264 LAN stream, and forwards basic mouse and keyboard events back to the Mac over LAN. It does not pretend to be a finished Parsec replacement.
 
 ## What Works Today
 
 - Tauri v2 desktop app for macOS and Windows.
 - LAN peer discovery over UDP on port `48170`.
 - Manual Mac host connect by IP from the Windows client.
-- Mac screen capture through the existing native capture backend.
+- Mac PaneLink virtual display creation through CoreGraphics.
+- Mac screen capture through the existing native capture backend, preferring the PaneLink virtual display.
 - Windows fullscreen/borderless display window.
-- Frame streaming over LAN on port `48171`.
+- H.264 OpenH264 frame streaming over LAN on port `48172`.
+- PNG frame streaming fallback/debug path over LAN on port `48171`.
 - Mouse move, click, wheel, and keyboard event forwarding to the Mac host control server.
 - Basic pairing/trust UI, connect/disconnect UI, status messages, and setup actions.
 - Fresh clone build with npm, Rust, and Tauri.
 
 ## Current Limitations
 
-- MVP streams one real captured desktop frame feed. Multi-monitor virtual display switching is not implemented yet.
-- The current video path is PNG frame polling, not hardware WebRTC/H.264. It is usable for MVP validation, but not final low-latency production video.
+- MVP supports one streamed display reliably first. Three-monitor switching is not implemented yet.
+- The current video path is H.264 over a simple LAN HTTP stream decoded with WebCodecs on Windows. It is not full WebRTC yet, so latency/jitter control is still basic.
+- OpenH264 is software encoding in this release, not Apple VideoToolbox hardware encoding yet.
 - macOS input forwarding requires Accessibility permission. If the permission is missing, macOS may block injected mouse/keyboard events.
 - macOS screen capture requires Screen Recording permission.
 - Audio and microphone routing are not implemented in the MVP.
@@ -37,7 +40,8 @@ The first usable version streams the Mac screen as a local PNG frame stream to a
 - macOS host and Windows client on the same LAN
 - Firewall access for:
   - UDP/TCP `48170` for discovery and control
-  - TCP `48171` for frame streaming
+  - TCP `48172` for H.264 video streaming
+  - TCP `48171` for PNG fallback/debug frame streaming
 
 ## Fresh Clone Setup
 
@@ -120,10 +124,10 @@ Click **Add**, select the manual Mac peer, then click **Connect**.
 
 ### 3. Expected Result
 
-The Windows app opens a fullscreen display window and loads frames from:
+The Windows app opens a fullscreen display window and loads H.264 chunks from:
 
 ```text
-http://<mac-lan-ip>:48171/frame
+http://<mac-lan-ip>:48172/h264
 ```
 
 Mouse and keyboard events from the Windows display window are sent back to:
@@ -143,6 +147,7 @@ If the Windows viewer says it cannot connect:
 - Try manual Mac IP instead of discovery.
 - On the Mac, confirm Screen Recording permission is granted.
 - On the Mac, confirm Accessibility permission is granted for input forwarding.
+- Confirm TCP `48172` is reachable from Windows to the Mac.
 
 If frames load but input does not work:
 
@@ -163,18 +168,18 @@ crates/
   panelink-input            input event schema and macOS CGEvent injection
   panelink-audio            audio device enumeration and future routing
   panelink-virtual-display  future virtual display backend boundary
-  panelink-video            future native video session boundary
+  panelink-video            H.264 LAN stream server and native video session boundary
 src-tauri/                  Tauri command bridge and LAN control server
 src/                        React desktop UI
 ```
 
 ## Next Roadmap
 
-1. Replace PNG frame polling with a hardware video path, preferably WebRTC/H.264 over LAN.
-2. Add a real macOS virtual display backend so the Mac can create an extra screen instead of mirroring/capturing the current desktop.
+1. Replace software OpenH264 with Apple VideoToolbox hardware encode on macOS.
+2. Move the H.264 stream onto WebRTC/RTP or QUIC for better jitter, congestion, and reconnect behavior.
 3. Add monitor selection on the Windows viewer for multi-monitor desks.
 4. Harden input forwarding with permission detection, better key maps, clipboard support, and pointer scaling per display.
-5. Add an end-to-end LAN smoke test that starts a host, starts a client, opens a display, fetches a frame, and submits an input batch.
+5. Add an end-to-end LAN smoke test that starts a host, starts a client, opens a display, decodes H.264, and submits an input batch.
 
 ## License
 

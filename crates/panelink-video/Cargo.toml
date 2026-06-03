@@ -6,4 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+openh264.workspace = true
+panelink-capture.workspace = true
 serde.workspace = true
+tiny_http.workspace = true

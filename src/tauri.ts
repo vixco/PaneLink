@@ -53,14 +53,14 @@ function streamForSession(request: StartStreamRequest, session: SessionSnapshot)
   const firstScreen = session.screens.find((screen) => request.screenIds.includes(screen.id)) ?? session.screens[0];
   const resolution = firstScreen ? screenResolution(firstScreen) : { width: 2560, height: 1440 };
   const multiplier = Math.max(request.screenIds.length, 1);
-  const qualityFps = request.quality === 'Sharp' ? 60 : request.quality === 'Balanced' ? 90 : 120;
+  const qualityFps = 60;
 
   return withNow({
     ...browserStream,
     status: 'streaming',
     activePeerId: request.peerId,
     screenIds: request.screenIds,
-    codec: request.quality === 'Sharp' ? 'HEVC VideoToolbox' : 'H.264 VideoToolbox',
+    codec: 'H.264 OpenH264',
     transport: 'WebRTC',
     quality: request.quality,
     width: resolution.width * multiplier,
@@ -210,8 +210,8 @@ export function openDisplayWindow(request: DisplayWindowRequest) {
       peerAddress: request.peerAddress,
       controlAddress: request.controlAddress,
       videoSessionId: request.videoSessionId ?? '',
-      videoTransport: request.videoTransport ?? 'WebRTC/RTP',
-      videoCodec: request.videoCodec ?? 'H.264 VideoToolbox',
+      videoTransport: request.videoTransport ?? 'H.264 LAN stream',
+      videoCodec: request.videoCodec ?? 'H.264 OpenH264',
       screens: String(Math.max(1, Math.min(request.screenCount, 3))),
       quality: request.quality,
     });
@@ -282,12 +282,12 @@ export function startVideoSession(request: VideoSessionRequest) {
   const fallback: VideoSession = {
     id: `browser-video-${Date.now()}`,
     active: true,
-    endpoint: `webrtc+rtp://${request.receiverPeerId}/panelink/browser?screens=${request.screenCount}`,
+    endpoint: `http://127.0.0.1:48172/h264?screens=${request.screenCount}`,
     controlAddress: request.controlAddress,
-    transport: 'WebRTC/RTP',
-    codec: request.quality === 'Sharp' ? 'HEVC VideoToolbox' : 'H.264 VideoToolbox',
+    transport: 'H.264 LAN stream',
+    codec: 'H.264 OpenH264',
     quality: request.quality,
-    targetFps: request.quality === 'Sharp' ? 60 : request.quality === 'Balanced' ? 90 : 120,
+    targetFps: 60,
     targetBitrateMbps: request.screenCount * (request.quality === 'Sharp' ? 52 : request.quality === 'Balanced' ? 36 : 28),
     screenCount: request.screenCount,
     width: request.width,
@@ -350,7 +350,19 @@ export function destroyVirtualDisplay(id: string) {
 export type HostDisplayPrepareResponse = {
   ok: boolean;
   frameUrl: string;
+  h264Stream: H264StreamSession | null;
   virtualDisplay: VirtualDisplaySession | null;
+  message: string;
+};
+
+export type H264StreamSession = {
+  active: boolean;
+  endpoint: string;
+  port: number;
+  transport: string;
+  codec: string;
+  targetFps: number;
+  targetBitrateMbps: number;
   message: string;
 };
 

@@ -30,6 +30,7 @@ uuid = { version = "1.11", features = ["v4", "serde"] }
 cpal = "0.16"
 tiny_http = "0.12"
 xcap = "0.9.6"
+openh264 = "0.9.3"
 panelink-core = { path = "crates/panelink-core" }
 panelink-discovery = { path = "crates/panelink-discovery" }
 panelink-transport = { path = "crates/panelink-transport" }

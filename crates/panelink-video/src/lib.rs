@@ -1,10 +1,25 @@
 use serde::{Deserialize, Serialize};
 use std::{
+    io::{Cursor, Read},
     sync::{Mutex, OnceLock},
+    thread,
+    time::Duration,
     time::{SystemTime, UNIX_EPOCH},
+};
+use tiny_http::{Header, Response, Server, StatusCode};
+
+use openh264::{
+    encoder::{
+        BitRate, Complexity, Encoder, EncoderConfig, FrameRate, RateControlMode, SpsPpsStrategy,
+        UsageType,
+    },
+    formats::{RgbaSliceU8, YUVBuffer},
+    OpenH264API,
 };
 
 pub const VIDEO_SIGNALING_PORT: u16 = 48170;
+pub const H264_STREAM_PORT: u16 = 48172;
+const DEFAULT_H264_TARGET_FPS: u16 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,20 +75,43 @@ pub struct VideoSession {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct H264StreamRequest {
+    pub width: u32,
+    pub height: u32,
+    pub target_fps: u16,
+    pub target_bitrate_mbps: u16,
+    pub quality: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct H264StreamSession {
+    pub active: bool,
+    pub endpoint: String,
+    pub port: u16,
+    pub transport: String,
+    pub codec: String,
+    pub target_fps: u16,
+    pub target_bitrate_mbps: u16,
+    pub message: String,
+}
+
 pub fn backend_report() -> VideoBackendReport {
     if cfg!(target_os = "macos") {
         return VideoBackendReport {
-            backend: "ScreenCaptureKit + VideoToolbox".into(),
-            state: VideoBackendState::PermissionRequired,
-            available: false,
-            can_start_source_stream: false,
-            transport: "WebRTC/RTP over PaneLink LAN signaling".into(),
-            codec: "H.264 hardware encode; HEVC for Sharp when available".into(),
-            hardware_accelerated: true,
-            message: "Native remote-desktop video engine is not installed yet; PaneLink will not start a fake screenshot stream.".into(),
+            backend: "ScreenCaptureKit + OpenH264".into(),
+            state: VideoBackendState::Available,
+            available: true,
+            can_start_source_stream: true,
+            transport: "H.264 Annex-B over PaneLink LAN HTTP stream".into(),
+            codec: "H.264 OpenH264".into(),
+            hardware_accelerated: false,
+            message: "Native H.264 LAN video stream is available; allow Screen Recording and Accessibility for input.".into(),
             actions: vec![
-                "Install the PaneLink native video engine".into(),
-                "Then allow Screen Recording and Accessibility for PaneLink".into(),
+                "Allow Screen Recording for PaneLink on macOS".into(),
+                "Allow Accessibility for keyboard and mouse forwarding".into(),
             ],
         };
     }
@@ -84,8 +122,8 @@ pub fn backend_report() -> VideoBackendReport {
             state: VideoBackendState::ReceiverOnly,
             available: true,
             can_start_source_stream: false,
-            transport: "WebRTC/RTP over PaneLink LAN signaling".into(),
-            codec: "H.264 hardware decode".into(),
+            transport: "H.264 Annex-B over PaneLink LAN HTTP stream".into(),
+            codec: "H.264 WebCodecs decode".into(),
             hardware_accelerated: true,
             message: "Receiver is ready, but this device cannot start the source video engine."
                 .into(),
@@ -113,7 +151,15 @@ pub fn start_video_session(request: VideoSessionRequest) -> Result<VideoSession,
         return Err(backend.message);
     }
 
-    let session = plan_video_session(request)?;
+    let mut session = plan_video_session(request)?;
+    let stream = start_h264_stream_server(H264StreamRequest {
+        width: session.width,
+        height: session.height,
+        target_fps: session.target_fps,
+        target_bitrate_mbps: session.target_bitrate_mbps,
+        quality: session.quality.clone(),
+    })?;
+    session.endpoint = stream.endpoint;
     *session_slot()
         .lock()
         .expect("video session mutex should not be poisoned") = Some(session.clone());
@@ -130,10 +176,9 @@ pub fn plan_video_session(request: VideoSessionRequest) -> Result<VideoSession, 
     let codec = codec_for_quality(quality);
     let id = format!("video-{}-{}", request.source_peer_id, now_unix_ms());
     let endpoint = format!(
-        "webrtc+rtp://{}/panelink/{}?screens={}&codec={}&fps={}",
-        request.receiver_peer_id,
-        id,
+        "http://127.0.0.1:{H264_STREAM_PORT}/h264?session={}&screens={}&codec={}&fps={}",
         request.screen_count,
+        percent_encode(&id),
         percent_encode(codec),
         target_fps
     );
@@ -142,7 +187,7 @@ pub fn plan_video_session(request: VideoSessionRequest) -> Result<VideoSession, 
         active: true,
         endpoint,
         control_address: request.control_address,
-        transport: "WebRTC/RTP".into(),
+        transport: "H.264 LAN stream".into(),
         codec: codec.into(),
         quality: quality.into(),
         target_fps,
@@ -150,11 +195,34 @@ pub fn plan_video_session(request: VideoSessionRequest) -> Result<VideoSession, 
         screen_count: request.screen_count,
         width: request.width,
         height: request.height,
-        message: "Native remote-desktop video session negotiated; PNG frame polling disabled."
-            .into(),
+        message: "Native H.264 LAN video session negotiated; PNG frame polling disabled.".into(),
     };
 
     Ok(session)
+}
+
+pub fn start_h264_stream_server(request: H264StreamRequest) -> Result<H264StreamSession, String> {
+    let request = normalized_h264_request(request);
+    *h264_config_slot()
+        .lock()
+        .map_err(|_| "H.264 stream configuration is unavailable".to_string())? = request.clone();
+
+    let port = h264_server_slot().get_or_init(start_h264_server).clone()?;
+    Ok(H264StreamSession {
+        active: true,
+        endpoint: format!(
+            "http://127.0.0.1:{port}/h264?fps={}&bitrateMbps={}&quality={}",
+            request.target_fps,
+            request.target_bitrate_mbps,
+            percent_encode(&request.quality)
+        ),
+        port,
+        transport: "H.264 LAN stream".into(),
+        codec: "H.264 OpenH264".into(),
+        target_fps: request.target_fps,
+        target_bitrate_mbps: request.target_bitrate_mbps,
+        message: "H.264 stream server is running.".into(),
+    })
 }
 
 pub fn current_video_session() -> Option<VideoSession> {
@@ -203,6 +271,269 @@ fn session_slot() -> &'static Mutex<Option<VideoSession>> {
     SESSION.get_or_init(|| Mutex::new(None))
 }
 
+fn h264_config_slot() -> &'static Mutex<H264StreamRequest> {
+    static CONFIG: OnceLock<Mutex<H264StreamRequest>> = OnceLock::new();
+    CONFIG.get_or_init(|| Mutex::new(default_h264_request()))
+}
+
+fn h264_server_slot() -> &'static OnceLock<Result<u16, String>> {
+    static SERVER: OnceLock<Result<u16, String>> = OnceLock::new();
+    &SERVER
+}
+
+fn default_h264_request() -> H264StreamRequest {
+    H264StreamRequest {
+        width: 1920,
+        height: 1080,
+        target_fps: DEFAULT_H264_TARGET_FPS,
+        target_bitrate_mbps: 36,
+        quality: "Sharp".into(),
+    }
+}
+
+fn normalized_h264_request(request: H264StreamRequest) -> H264StreamRequest {
+    H264StreamRequest {
+        width: request.width.clamp(640, 7680),
+        height: request.height.clamp(360, 4320),
+        target_fps: request.target_fps.clamp(30, 60),
+        target_bitrate_mbps: request.target_bitrate_mbps.clamp(8, 120),
+        quality: normalize_quality(&request.quality).into(),
+    }
+}
+
+fn start_h264_server() -> Result<u16, String> {
+    let server = Server::http(("0.0.0.0", H264_STREAM_PORT)).map_err(|error| {
+        format!("H.264 stream server could not bind port {H264_STREAM_PORT}: {error}")
+    })?;
+
+    thread::Builder::new()
+        .name("panelink-h264-stream-server".into())
+        .spawn(move || run_h264_server(server))
+        .map_err(|error| format!("H.264 stream server could not start: {error}"))?;
+
+    Ok(H264_STREAM_PORT)
+}
+
+fn run_h264_server(server: Server) {
+    for request in server.incoming_requests() {
+        let method = request.method().as_str().to_string();
+        let path = request.url().split('?').next().unwrap_or("/");
+
+        if method == "OPTIONS" {
+            let _ = request.respond(empty_response(StatusCode(204)));
+        } else if method == "GET" && path == "/h264" {
+            match active_h264_config() {
+                Ok(config) => {
+                    let _ = request.respond(h264_stream_response(config));
+                }
+                Err(error) => {
+                    let _ = request.respond(text_response(error, StatusCode(500)));
+                }
+            }
+        } else if method == "GET" && path == "/health" {
+            let _ = request.respond(text_response("ok h264=ready", StatusCode(200)));
+        } else {
+            let _ = request.respond(text_response(
+                "PaneLink H.264 stream server",
+                StatusCode(200),
+            ));
+        }
+    }
+}
+
+fn active_h264_config() -> Result<H264StreamRequest, String> {
+    h264_config_slot()
+        .lock()
+        .map_err(|_| "H.264 stream configuration is unavailable".to_string())
+        .map(|config| config.clone())
+}
+
+fn h264_stream_response(config: H264StreamRequest) -> Response<H264StreamReader> {
+    with_common_headers(
+        Response::new(
+            StatusCode(200),
+            vec![header("Content-Type", "video/h264")],
+            H264StreamReader::new(config),
+            None,
+            None,
+        )
+        .with_header(header("Transfer-Encoding", "chunked")),
+    )
+}
+
+fn empty_response(status: StatusCode) -> Response<Cursor<Vec<u8>>> {
+    with_common_headers(Response::from_data(Vec::new()).with_status_code(status))
+}
+
+fn text_response(text: impl Into<String>, status: StatusCode) -> Response<Cursor<Vec<u8>>> {
+    with_common_headers(
+        Response::from_string(text.into())
+            .with_status_code(status)
+            .with_header(header("Content-Type", "text/plain; charset=utf-8")),
+    )
+}
+
+fn with_common_headers<R: Read>(response: Response<R>) -> Response<R> {
+    response
+        .with_header(header("Access-Control-Allow-Origin", "*"))
+        .with_header(header("Access-Control-Allow-Methods", "GET, OPTIONS"))
+        .with_header(header("Access-Control-Allow-Headers", "*"))
+        .with_header(header(
+            "Cache-Control",
+            "no-store, no-cache, must-revalidate",
+        ))
+}
+
+fn header(name: &'static str, value: &'static str) -> Header {
+    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("static header should be valid")
+}
+
+struct H264StreamReader {
+    config: H264StreamRequest,
+    encoder: Option<Encoder>,
+    pending: Vec<u8>,
+    pending_offset: usize,
+    frame_id: u64,
+}
+
+impl H264StreamReader {
+    fn new(config: H264StreamRequest) -> Self {
+        Self {
+            config,
+            encoder: None,
+            pending: Vec::new(),
+            pending_offset: 0,
+            frame_id: 0,
+        }
+    }
+
+    fn fill_pending(&mut self) -> std::io::Result<()> {
+        if self.pending_offset < self.pending.len() {
+            return Ok(());
+        }
+
+        let frame_duration =
+            Duration::from_micros(1_000_000 / u64::from(self.config.target_fps.max(1)));
+        thread::sleep(frame_duration);
+
+        let frame = panelink_capture::capture_primary_rgba().map_err(io_error)?;
+        let normalized = normalized_rgba_frame(frame)?;
+        let source = RgbaSliceU8::new(
+            &normalized.rgba,
+            (normalized.width as usize, normalized.height as usize),
+        );
+        let yuv = YUVBuffer::from_rgb_source(source);
+        let force_keyframe = self
+            .frame_id
+            .is_multiple_of(u64::from(self.config.target_fps.max(1)));
+        let encoder = self.encoder()?;
+        if force_keyframe {
+            encoder.force_intra_frame();
+        }
+        let encoded = encoder
+            .encode(&yuv)
+            .map_err(|error| io_error(format!("Could not encode H.264 frame: {error}")))?
+            .to_vec();
+
+        self.frame_id = self.frame_id.saturating_add(1);
+        self.pending.clear();
+        self.pending
+            .extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+        self.pending.extend_from_slice(&encoded);
+        self.pending_offset = 0;
+
+        Ok(())
+    }
+
+    fn encoder(&mut self) -> std::io::Result<&mut Encoder> {
+        if self.encoder.is_none() {
+            let bitrate_bps = u32::from(self.config.target_bitrate_mbps) * 1_000_000;
+            let config = EncoderConfig::new()
+                .bitrate(BitRate::from_bps(bitrate_bps))
+                .max_frame_rate(FrameRate::from_hz(f32::from(self.config.target_fps)))
+                .rate_control_mode(RateControlMode::Bitrate)
+                .usage_type(UsageType::ScreenContentRealTime)
+                .sps_pps_strategy(SpsPpsStrategy::SpsPpsListing)
+                .complexity(Complexity::Low)
+                .skip_frames(false)
+                .debug(false);
+            let encoder =
+                Encoder::with_api_config(OpenH264API::from_source(), config).map_err(|error| {
+                    io_error(format!("Could not initialize OpenH264 encoder: {error}"))
+                })?;
+            self.encoder = Some(encoder);
+        }
+
+        Ok(self
+            .encoder
+            .as_mut()
+            .expect("encoder was initialized above"))
+    }
+}
+
+impl Read for H264StreamReader {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+
+        self.fill_pending()?;
+        let remaining = &self.pending[self.pending_offset..];
+        let len = remaining.len().min(output.len());
+        output[..len].copy_from_slice(&remaining[..len]);
+        self.pending_offset += len;
+        Ok(len)
+    }
+}
+
+struct NormalizedRgbaFrame {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+fn normalized_rgba_frame(
+    frame: panelink_capture::CapturedFrame,
+) -> std::io::Result<NormalizedRgbaFrame> {
+    let width = frame.width - (frame.width % 2);
+    let height = frame.height - (frame.height % 2);
+    if width == 0 || height == 0 {
+        return Err(io_error("Captured frame has invalid dimensions"));
+    }
+
+    if width == frame.width && height == frame.height {
+        return Ok(NormalizedRgbaFrame {
+            width,
+            height,
+            rgba: frame.rgba,
+        });
+    }
+
+    let source_stride = frame.width as usize * 4;
+    let target_stride = width as usize * 4;
+    let mut rgba = Vec::with_capacity(target_stride * height as usize);
+    for row in 0..height as usize {
+        let start = row * source_stride;
+        let end = start + target_stride;
+        rgba.extend_from_slice(
+            frame
+                .rgba
+                .get(start..end)
+                .ok_or_else(|| io_error("Captured frame buffer is shorter than expected"))?,
+        );
+    }
+
+    Ok(NormalizedRgbaFrame {
+        width,
+        height,
+        rgba,
+    })
+}
+
+fn io_error(error: impl Into<String>) -> std::io::Error {
+    std::io::Error::other(error.into())
+}
+
 fn normalize_quality(quality: &str) -> &'static str {
     match quality {
         "Sharp" => "Sharp",
@@ -214,8 +545,8 @@ fn normalize_quality(quality: &str) -> &'static str {
 fn target_fps_for_quality(quality: &str) -> u16 {
     match quality {
         "Sharp" => 60,
-        "Balanced" => 90,
-        _ => 120,
+        "Balanced" => 60,
+        _ => 60,
     }
 }
 
@@ -230,10 +561,8 @@ fn target_bitrate_for_quality(quality: &str, screen_count: u8) -> u16 {
 }
 
 fn codec_for_quality(quality: &str) -> &'static str {
-    match quality {
-        "Sharp" => "HEVC VideoToolbox",
-        _ => "H.264 VideoToolbox",
-    }
+    let _ = quality;
+    "H.264 OpenH264"
 }
 
 fn percent_encode(value: &str) -> String {
@@ -263,7 +592,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn video_session_contract_is_not_png_polling() {
+    fn video_session_contract_is_h264_lan_stream_not_png_polling() {
         let session = plan_video_session(VideoSessionRequest {
             source_peer_id: "mac".into(),
             receiver_peer_id: "windows".into(),
@@ -276,9 +605,9 @@ mod tests {
         })
         .expect("video session should start");
 
-        assert_eq!(session.transport, "WebRTC/RTP");
-        assert!(session.endpoint.starts_with("webrtc+rtp://"));
-        assert!(session.codec.contains("VideoToolbox"));
+        assert_eq!(session.transport, "H.264 LAN stream");
+        assert!(session.endpoint.starts_with("http://127.0.0.1:48172/h264"));
+        assert_eq!(session.codec, "H.264 OpenH264");
         assert!(!session.endpoint.to_lowercase().contains("png"));
         assert!(!session.endpoint.to_lowercase().contains("/frame"));
         assert!(!session.control_address.contains("48171"));
@@ -312,10 +641,10 @@ mod tests {
         })
         .expect("sharp should start");
 
-        assert_eq!(low.target_fps, 120);
+        assert_eq!(low.target_fps, 60);
         assert_eq!(sharp.target_fps, 60);
         assert!(sharp.target_bitrate_mbps > low.target_bitrate_mbps);
-        assert!(sharp.codec.contains("HEVC"));
+        assert_eq!(sharp.codec, "H.264 OpenH264");
     }
 
     #[test]
