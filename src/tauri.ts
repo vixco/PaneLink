@@ -351,12 +351,24 @@ export function getFrameServerUrl() {
   return call<string>('get_frame_server_url', 'http://127.0.0.1:48171/frame');
 }
 
-export function getFrameServerLanUrl() {
-  return call<string>('get_frame_server_lan_url', 'http://127.0.0.1:48171/frame');
+export function getFrameServerLanUrl(peerAddress?: string) {
+  if (isTauri) {
+    return peerAddress
+      ? invoke<string>('get_frame_server_lan_url_for_peer', { peerAddress })
+      : invoke<string>('get_frame_server_lan_url');
+  }
+
+  return Promise.resolve('http://127.0.0.1:48171/frame');
 }
 
-export function getControlServerLanUrl() {
-  return call<string>('get_control_server_lan_url', 'http://127.0.0.1:48170');
+export function getControlServerLanUrl(peerAddress?: string) {
+  if (isTauri) {
+    return peerAddress
+      ? invoke<string>('get_control_server_lan_url_for_peer', { peerAddress })
+      : invoke<string>('get_control_server_lan_url');
+  }
+
+  return Promise.resolve('http://127.0.0.1:48170');
 }
 
 export function getDisplayFrameImageUrl(url: string, nonce: number, quality: StreamState['quality']) {
