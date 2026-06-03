@@ -93,6 +93,7 @@ export type StartStreamRequest = {
 export type DisplayWindowRequest = {
   peerId: string;
   peerAddress: string;
+  screenEndpoints?: string[];
   controlAddress: string;
   videoSessionId?: string;
   videoTransport?: string;

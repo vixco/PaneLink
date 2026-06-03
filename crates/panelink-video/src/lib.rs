@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     io::{Cursor, Read},
     sync::{Mutex, OnceLock},
     thread,
@@ -21,6 +22,10 @@ pub const VIDEO_SIGNALING_PORT: u16 = 48170;
 pub const H264_STREAM_PORT: u16 = 48172;
 pub const H264_STREAM_PATH: &str = "/h264";
 const DEFAULT_H264_TARGET_FPS: u16 = 60;
+
+fn default_screen_index() -> u8 {
+    1
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,11 +84,17 @@ pub struct VideoSession {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct H264StreamRequest {
+    #[serde(default = "default_screen_index")]
+    pub screen_index: u8,
     pub width: u32,
     pub height: u32,
     pub target_fps: u16,
     pub target_bitrate_mbps: u16,
     pub quality: String,
+    #[serde(default)]
+    pub capture_display_id: Option<u32>,
+    #[serde(default)]
+    pub capture_display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +103,7 @@ pub struct H264StreamSession {
     pub active: bool,
     pub endpoint: String,
     pub port: u16,
+    pub screen_index: u8,
     pub transport: String,
     pub codec: String,
     pub target_fps: u16,
@@ -154,11 +166,14 @@ pub fn start_video_session(request: VideoSessionRequest) -> Result<VideoSession,
 
     let mut session = plan_video_session(request)?;
     let stream = configure_h264_control_stream(H264StreamRequest {
+        screen_index: 1,
         width: session.width,
         height: session.height,
         target_fps: session.target_fps,
         target_bitrate_mbps: session.target_bitrate_mbps,
         quality: session.quality.clone(),
+        capture_display_id: None,
+        capture_display_name: None,
     })?;
     session.endpoint = stream.endpoint;
     *session_slot()
@@ -209,12 +224,14 @@ pub fn start_h264_stream_server(request: H264StreamRequest) -> Result<H264Stream
     Ok(H264StreamSession {
         active: true,
         endpoint: format!(
-            "http://127.0.0.1:{port}/h264?fps={}&bitrateMbps={}&quality={}",
+            "http://127.0.0.1:{port}/h264?screen={}&fps={}&bitrateMbps={}&quality={}",
+            request.screen_index,
             request.target_fps,
             request.target_bitrate_mbps,
             percent_encode(&request.quality)
         ),
         port,
+        screen_index: request.screen_index,
         transport: "H.264 LAN stream".into(),
         codec: "H.264 OpenH264".into(),
         target_fps: request.target_fps,
@@ -231,12 +248,14 @@ pub fn configure_h264_control_stream(
     Ok(H264StreamSession {
         active: true,
         endpoint: format!(
-            "http://127.0.0.1:{VIDEO_SIGNALING_PORT}{H264_STREAM_PATH}?fps={}&bitrateMbps={}&quality={}",
+            "http://127.0.0.1:{VIDEO_SIGNALING_PORT}{H264_STREAM_PATH}?screen={}&fps={}&bitrateMbps={}&quality={}",
+            request.screen_index,
             request.target_fps,
             request.target_bitrate_mbps,
             percent_encode(&request.quality)
         ),
         port: VIDEO_SIGNALING_PORT,
+        screen_index: request.screen_index,
         transport: "H.264 LAN stream".into(),
         codec: "H.264 OpenH264".into(),
         target_fps: request.target_fps,
@@ -251,7 +270,8 @@ pub fn respond_h264_stream_request(request: tiny_http::Request) {
         return;
     }
 
-    match active_h264_config() {
+    let screen_index = h264_screen_from_url(request.url());
+    match active_h264_config(screen_index) {
         Ok(config) => {
             let _ = request.respond(h264_stream_response(config));
         }
@@ -307,9 +327,13 @@ fn session_slot() -> &'static Mutex<Option<VideoSession>> {
     SESSION.get_or_init(|| Mutex::new(None))
 }
 
-fn h264_config_slot() -> &'static Mutex<H264StreamRequest> {
-    static CONFIG: OnceLock<Mutex<H264StreamRequest>> = OnceLock::new();
-    CONFIG.get_or_init(|| Mutex::new(default_h264_request()))
+fn h264_config_slot() -> &'static Mutex<HashMap<u8, H264StreamRequest>> {
+    static CONFIG: OnceLock<Mutex<HashMap<u8, H264StreamRequest>>> = OnceLock::new();
+    CONFIG.get_or_init(|| {
+        let mut configs = HashMap::new();
+        configs.insert(1, default_h264_request());
+        Mutex::new(configs)
+    })
 }
 
 fn h264_server_slot() -> &'static OnceLock<Result<u16, String>> {
@@ -319,30 +343,40 @@ fn h264_server_slot() -> &'static OnceLock<Result<u16, String>> {
 
 fn default_h264_request() -> H264StreamRequest {
     H264StreamRequest {
+        screen_index: 1,
         width: 1920,
         height: 1080,
         target_fps: DEFAULT_H264_TARGET_FPS,
         target_bitrate_mbps: 36,
         quality: "Sharp".into(),
+        capture_display_id: None,
+        capture_display_name: None,
     }
 }
 
 fn set_active_h264_config(request: H264StreamRequest) -> Result<H264StreamRequest, String> {
     let request = normalized_h264_request(request);
-    *h264_config_slot()
+    h264_config_slot()
         .lock()
-        .map_err(|_| "H.264 stream configuration is unavailable".to_string())? = request.clone();
+        .map_err(|_| "H.264 stream configuration is unavailable".to_string())?
+        .insert(request.screen_index, request.clone());
 
     Ok(request)
 }
 
 fn normalized_h264_request(request: H264StreamRequest) -> H264StreamRequest {
     H264StreamRequest {
+        screen_index: request.screen_index.clamp(1, 3),
         width: request.width.clamp(640, 7680),
         height: request.height.clamp(360, 4320),
         target_fps: request.target_fps.clamp(30, 60),
         target_bitrate_mbps: request.target_bitrate_mbps.clamp(8, 120),
         quality: normalize_quality(&request.quality).into(),
+        capture_display_id: request.capture_display_id,
+        capture_display_name: request
+            .capture_display_name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty()),
     }
 }
 
@@ -367,7 +401,8 @@ fn run_h264_server(server: Server) {
         if method == "OPTIONS" {
             let _ = request.respond(empty_response(StatusCode(204)));
         } else if method == "GET" && path == H264_STREAM_PATH {
-            match active_h264_config() {
+            let screen_index = h264_screen_from_url(request.url());
+            match active_h264_config(screen_index) {
                 Ok(config) => {
                     let _ = request.respond(h264_stream_response(config));
                 }
@@ -386,11 +421,25 @@ fn run_h264_server(server: Server) {
     }
 }
 
-fn active_h264_config() -> Result<H264StreamRequest, String> {
+fn active_h264_config(screen_index: u8) -> Result<H264StreamRequest, String> {
     h264_config_slot()
         .lock()
         .map_err(|_| "H.264 stream configuration is unavailable".to_string())
-        .map(|config| config.clone())
+        .and_then(|configs| {
+            configs
+                .get(&screen_index.clamp(1, 3))
+                .or_else(|| configs.get(&1))
+                .cloned()
+                .ok_or_else(|| "H.264 stream configuration is unavailable".to_string())
+        })
+}
+
+fn h264_screen_from_url(url: &str) -> u8 {
+    url.split_once('?')
+        .and_then(|(_, query)| query_value(query, "screen"))
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(1)
+        .clamp(1, 3)
 }
 
 fn h264_stream_response(config: H264StreamRequest) -> Response<H264StreamReader> {
@@ -462,7 +511,11 @@ impl H264StreamReader {
             Duration::from_micros(1_000_000 / u64::from(self.config.target_fps.max(1)));
         thread::sleep(frame_duration);
 
-        let frame = panelink_capture::capture_primary_rgba().map_err(io_error)?;
+        let frame = panelink_capture::capture_rgba_for_target(panelink_capture::CaptureTarget {
+            display_id: self.config.capture_display_id,
+            display_name: self.config.capture_display_name.clone(),
+        })
+        .map_err(io_error)?;
         let normalized = normalized_rgba_frame(frame)?;
         let source = RgbaSliceU8::new(
             &normalized.rgba,
@@ -625,6 +678,59 @@ fn percent_encode(value: &str) -> String {
     encoded
 }
 
+fn query_value(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|part| {
+        let (part_key, value) = part.split_once('=')?;
+        (part_key == key).then(|| percent_decode(value))
+    })
+}
+
+fn percent_decode(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut bytes = value.as_bytes().iter().copied();
+
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'+' => output.push(' '),
+            b'%' => {
+                let Some(high) = bytes.next() else {
+                    output.push('%');
+                    break;
+                };
+                let Some(low) = bytes.next() else {
+                    output.push('%');
+                    output.push(high as char);
+                    break;
+                };
+                match hex_byte(high, low) {
+                    Some(decoded) => output.push(decoded as char),
+                    None => {
+                        output.push('%');
+                        output.push(high as char);
+                        output.push(low as char);
+                    }
+                }
+            }
+            _ => output.push(byte as char),
+        }
+    }
+
+    output
+}
+
+fn hex_byte(high: u8, low: u8) -> Option<u8> {
+    Some(hex_value(high)? * 16 + hex_value(low)?)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -662,16 +768,57 @@ mod tests {
     #[test]
     fn control_stream_uses_existing_control_port_to_avoid_extra_firewall_hole() {
         let session = configure_h264_control_stream(H264StreamRequest {
+            screen_index: 1,
             width: 1920,
             height: 1080,
             target_fps: 60,
             target_bitrate_mbps: 28,
             quality: "Low latency".into(),
+            capture_display_id: Some(101),
+            capture_display_name: Some("PaneLink Virtual Display 1".into()),
         })
         .expect("control stream should configure");
 
         assert_eq!(session.port, VIDEO_SIGNALING_PORT);
         assert!(session.endpoint.starts_with("http://127.0.0.1:48170/h264"));
+        assert!(session.endpoint.contains("screen=1"));
+    }
+
+    #[test]
+    fn control_streams_are_configured_independently_per_virtual_display() {
+        let first = configure_h264_control_stream(H264StreamRequest {
+            screen_index: 1,
+            width: 1920,
+            height: 1080,
+            target_fps: 60,
+            target_bitrate_mbps: 28,
+            quality: "Low latency".into(),
+            capture_display_id: Some(101),
+            capture_display_name: Some("PaneLink Virtual Display 1".into()),
+        })
+        .expect("first screen should configure");
+        let second = configure_h264_control_stream(H264StreamRequest {
+            screen_index: 2,
+            width: 2560,
+            height: 1440,
+            target_fps: 60,
+            target_bitrate_mbps: 52,
+            quality: "Sharp".into(),
+            capture_display_id: Some(102),
+            capture_display_name: Some("PaneLink Virtual Display 2".into()),
+        })
+        .expect("second screen should configure");
+
+        assert_ne!(first.endpoint, second.endpoint);
+        assert!(first.endpoint.contains("screen=1"));
+        assert!(second.endpoint.contains("screen=2"));
+
+        let first_config = active_h264_config(1).expect("first config should exist");
+        let second_config = active_h264_config(2).expect("second config should exist");
+        assert_eq!(first_config.capture_display_id, Some(101));
+        assert_eq!(second_config.capture_display_id, Some(102));
+        assert_eq!(first_config.width, 1920);
+        assert_eq!(second_config.width, 2560);
     }
 
     #[test]

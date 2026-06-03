@@ -56,6 +56,7 @@ struct HostDisplayPrepareRequest {
     width: u32,
     height: u32,
     refresh_hz: u16,
+    screen_count: u8,
     quality: String,
 }
 
@@ -65,7 +66,9 @@ struct HostDisplayPrepareResponse {
     ok: bool,
     frame_url: String,
     h264_stream: Option<panelink_video::H264StreamSession>,
+    h264_streams: Vec<panelink_video::H264StreamSession>,
     virtual_display: Option<panelink_virtual_display::VirtualDisplaySession>,
+    virtual_displays: Vec<panelink_virtual_display::VirtualDisplaySession>,
     message: String,
 }
 
@@ -219,12 +222,14 @@ fn request_receiver_display(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "Remote display request is missing video endpoint".to_string())?;
+    let screen_endpoints = screen_endpoints_param(request.screen_endpoints.as_deref());
     let url = format!(
-        "http://{}:{}/open-display?peerId={}&peerAddress={}&controlAddress={}&videoSessionId={}&videoTransport={}&videoCodec={}&screens={}&quality={}",
+        "http://{}:{}/open-display?peerId={}&peerAddress={}&screenEndpoints={}&controlAddress={}&videoSessionId={}&videoTransport={}&videoCodec={}&screens={}&quality={}",
         host,
         panelink_discovery::DEFAULT_PORT,
         percent_encode(peer_id),
         percent_encode(peer_address),
+        percent_encode(&screen_endpoints),
         percent_encode(request.control_address.as_deref().unwrap_or_default()),
         percent_encode(request.video_session_id.as_deref().unwrap_or_default()),
         percent_encode(
@@ -297,6 +302,7 @@ struct DisplayWindowOpenRequest {
     screen_count: Option<u8>,
     peer_id: Option<String>,
     peer_address: Option<String>,
+    screen_endpoints: Option<Vec<String>>,
     control_address: Option<String>,
     video_session_id: Option<String>,
     video_transport: Option<String>,
@@ -310,10 +316,12 @@ fn open_display_window_for_request(
 ) -> Result<(), String> {
     let screen_count = request.screen_count.unwrap_or(1).clamp(1, 3);
     let initial_width = if screen_count > 1 { 1440.0 } else { 1280.0 };
+    let screen_endpoints = screen_endpoints_param(request.screen_endpoints.as_deref());
     let display_url = format!(
-        "index.html?window=display&peerId={}&peerAddress={}&controlAddress={}&videoSessionId={}&videoTransport={}&videoCodec={}&screens={screen_count}&quality={}",
+        "index.html?window=display&peerId={}&peerAddress={}&screenEndpoints={}&controlAddress={}&videoSessionId={}&videoTransport={}&videoCodec={}&screens={screen_count}&quality={}",
         percent_encode(&request.peer_id.unwrap_or_else(|| "unknown".into())),
         percent_encode(&request.peer_address.unwrap_or_default()),
+        percent_encode(&screen_endpoints),
         percent_encode(&request.control_address.unwrap_or_default()),
         percent_encode(&request.video_session_id.unwrap_or_default()),
         percent_encode(
@@ -918,24 +926,34 @@ fn host_display_prepare_response(request: HostDisplayPrepareRequest) -> Response
 fn prepare_host_display(
     request: HostDisplayPrepareRequest,
 ) -> Result<HostDisplayPrepareResponse, String> {
-    let virtual_display = ensure_host_virtual_display(&request)?;
+    let virtual_displays = ensure_host_virtual_displays(&request)?;
     let port = panelink_capture::start_frame_server()?;
-    let h264_stream =
-        panelink_video::configure_h264_control_stream(panelink_video::H264StreamRequest {
-            width: request.width,
-            height: request.height,
-            target_fps: request.refresh_hz.min(60),
-            target_bitrate_mbps: h264_bitrate_for_quality(&request.quality),
-            quality: request.quality.clone(),
-        })?;
+    let h264_streams = virtual_displays
+        .iter()
+        .enumerate()
+        .map(|(index, virtual_display)| {
+            let screen_index = (index + 1).clamp(1, 3) as u8;
+            panelink_video::configure_h264_control_stream(panelink_video::H264StreamRequest {
+                screen_index,
+                width: request.width,
+                height: request.height,
+                target_fps: request.refresh_hz.min(60),
+                target_bitrate_mbps: h264_bitrate_for_quality(&request.quality),
+                quality: request.quality.clone(),
+                capture_display_id: virtual_display.platform_display_id,
+                capture_display_name: Some(virtual_display.display_name.clone()),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(HostDisplayPrepareResponse {
         ok: true,
         frame_url: format!("http://127.0.0.1:{port}/frame"),
-        h264_stream: Some(h264_stream),
-        virtual_display: Some(virtual_display),
-        message: "PaneLink host virtual display is ready and H.264 stream server is running."
-            .into(),
+        h264_stream: h264_streams.first().cloned(),
+        h264_streams,
+        virtual_display: virtual_displays.first().cloned(),
+        virtual_displays,
+        message: "PaneLink host virtual displays are ready and H.264 streams are running.".into(),
     })
 }
 
@@ -947,47 +965,73 @@ fn h264_bitrate_for_quality(quality: &str) -> u16 {
     }
 }
 
-fn ensure_host_virtual_display(
+fn ensure_host_virtual_displays(
     request: &HostDisplayPrepareRequest,
-) -> Result<panelink_virtual_display::VirtualDisplaySession, String> {
+) -> Result<Vec<panelink_virtual_display::VirtualDisplaySession>, String> {
     let mut slot = host_virtual_display_slot()
         .lock()
         .map_err(|_| "Host virtual display state is unavailable".to_string())?;
+    let screen_count = request.screen_count.clamp(1, 3);
 
-    if let Some(session) = slot.as_ref().filter(|session| session.active) {
-        set_capture_target_for_virtual_display(session);
-        return Ok(session.clone());
+    slot.retain(|session| session.active);
+
+    while slot.len() < usize::from(screen_count) {
+        let screen_index = slot.len() + 1;
+        let session = panelink_virtual_display::create_virtual_display(
+            panelink_virtual_display::VirtualDisplayRequest {
+                name: format!("PaneLink Virtual Display {screen_index}"),
+                width: request.width,
+                height: request.height,
+                refresh_hz: request.refresh_hz,
+            },
+        )?;
+        slot.push(session);
     }
 
-    let session = panelink_virtual_display::create_virtual_display(
-        panelink_virtual_display::VirtualDisplayRequest {
-            name: "PaneLink Virtual Display".into(),
-            width: request.width,
-            height: request.height,
-            refresh_hz: request.refresh_hz,
-        },
-    )?;
-    set_capture_target_for_virtual_display(&session);
-    *slot = Some(session.clone());
+    let sessions = slot
+        .iter()
+        .take(usize::from(screen_count))
+        .cloned()
+        .collect::<Vec<_>>();
 
-    Ok(session)
+    for (index, session) in sessions.iter().enumerate() {
+        set_capture_target_for_virtual_display((index + 1) as u8, session);
+    }
+
+    Ok(sessions)
+}
+
+#[allow(dead_code)]
+fn ensure_host_virtual_display(
+    request: &HostDisplayPrepareRequest,
+) -> Result<panelink_virtual_display::VirtualDisplaySession, String> {
+    ensure_host_virtual_displays(request)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Host virtual display state is unavailable".to_string())
 }
 
 fn set_capture_target_for_virtual_display(
+    screen_index: u8,
     session: &panelink_virtual_display::VirtualDisplaySession,
 ) {
-    panelink_capture::set_capture_target(panelink_capture::CaptureTarget {
-        display_id: session.platform_display_id,
-        display_name: Some(session.display_name.clone()),
-    });
-    panelink_input::set_pointer_target_display(session.platform_display_id);
+    if screen_index == 1 {
+        panelink_capture::set_capture_target(panelink_capture::CaptureTarget {
+            display_id: session.platform_display_id,
+            display_name: Some(session.display_name.clone()),
+        });
+    }
+    panelink_input::set_pointer_target_display_for_screen(
+        screen_index,
+        session.platform_display_id,
+    );
 }
 
 fn host_virtual_display_slot(
-) -> &'static Mutex<Option<panelink_virtual_display::VirtualDisplaySession>> {
-    static HOST_DISPLAY: OnceLock<Mutex<Option<panelink_virtual_display::VirtualDisplaySession>>> =
+) -> &'static Mutex<Vec<panelink_virtual_display::VirtualDisplaySession>> {
+    static HOST_DISPLAY: OnceLock<Mutex<Vec<panelink_virtual_display::VirtualDisplaySession>>> =
         OnceLock::new();
-    HOST_DISPLAY.get_or_init(|| Mutex::new(None))
+    HOST_DISPLAY.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn remote_input_response(request: &mut tiny_http::Request) -> Response<Cursor<Vec<u8>>> {
@@ -1046,6 +1090,11 @@ fn host_display_prepare_request_from_url(url: &str) -> Result<HostDisplayPrepare
             .get("refreshHz")
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(60),
+        screen_count: values
+            .get("screens")
+            .and_then(|value| value.parse::<u8>().ok())
+            .unwrap_or(1)
+            .clamp(1, 3),
         quality: values
             .get("quality")
             .filter(|value| !value.trim().is_empty())
@@ -1104,12 +1153,36 @@ fn display_request_from_url(url: &str) -> Result<DisplayWindowOpenRequest, Strin
         screen_count: Some(screen_count),
         peer_id: values.get("peerId").cloned(),
         peer_address: Some(peer_address),
+        screen_endpoints: values
+            .get("screenEndpoints")
+            .map(|value| split_screen_endpoints(value)),
         control_address: values.get("controlAddress").cloned(),
         video_session_id: values.get("videoSessionId").cloned(),
         video_transport: values.get("videoTransport").cloned(),
         video_codec: values.get("videoCodec").cloned(),
         quality: values.get("quality").cloned(),
     })
+}
+
+fn screen_endpoints_param(endpoints: Option<&[String]>) -> String {
+    endpoints
+        .unwrap_or_default()
+        .iter()
+        .filter(|endpoint| !endpoint.trim().is_empty())
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn split_screen_endpoints(value: &str) -> Vec<String> {
+    value
+        .split('|')
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .take(3)
+        .map(str::to_string)
+        .collect()
 }
 
 fn parse_query(query: &str) -> HashMap<String, String> {
@@ -1218,14 +1291,21 @@ mod tests {
     #[test]
     fn display_request_from_url_decodes_remote_display_payload() {
         let request = display_request_from_url(
-            "/open-display?peerId=mac%201&peerAddress=http%3A%2F%2F192.168.1.24%3A48170%2Fh264&controlAddress=http%3A%2F%2F192.168.1.24%3A48170&videoSessionId=video-1&videoTransport=H.264+LAN+stream&videoCodec=H.264+OpenH264&screens=2&quality=Low+latency",
+            "/open-display?peerId=mac%201&peerAddress=http%3A%2F%2F192.168.1.24%3A48170%2Fh264%3Fscreen%3D1&screenEndpoints=http%3A%2F%2F192.168.1.24%3A48170%2Fh264%3Fscreen%3D1%7Chttp%3A%2F%2F192.168.1.24%3A48170%2Fh264%3Fscreen%3D2&controlAddress=http%3A%2F%2F192.168.1.24%3A48170&videoSessionId=video-1&videoTransport=H.264+LAN+stream&videoCodec=H.264+OpenH264&screens=2&quality=Low+latency",
         )
         .expect("remote display request should parse");
 
         assert_eq!(request.peer_id.as_deref(), Some("mac 1"));
         assert_eq!(
             request.peer_address.as_deref(),
-            Some("http://192.168.1.24:48170/h264")
+            Some("http://192.168.1.24:48170/h264?screen=1")
+        );
+        assert_eq!(
+            request.screen_endpoints.unwrap_or_default(),
+            vec![
+                "http://192.168.1.24:48170/h264?screen=1".to_string(),
+                "http://192.168.1.24:48170/h264?screen=2".to_string()
+            ]
         );
         assert_eq!(
             request.control_address.as_deref(),
@@ -1241,7 +1321,7 @@ mod tests {
     #[test]
     fn host_display_prepare_request_decodes_monitor_mode() {
         let request = host_display_prepare_request_from_url(
-            "/prepare-host-display?width=2560&height=1440&refreshHz=60&quality=Sharp",
+            "/prepare-host-display?width=2560&height=1440&refreshHz=60&quality=Sharp&screens=3",
         )
         .expect("host display request should parse");
 
@@ -1249,6 +1329,7 @@ mod tests {
         assert_eq!(request.height, 1440);
         assert_eq!(request.refresh_hz, 60);
         assert_eq!(request.quality, "Sharp");
+        assert_eq!(request.screen_count, 3);
     }
 
     #[test]
@@ -1351,7 +1432,7 @@ fn create_virtual_display(
     request: panelink_virtual_display::VirtualDisplayRequest,
 ) -> Result<panelink_virtual_display::VirtualDisplaySession, String> {
     let session = panelink_virtual_display::create_virtual_display(request)?;
-    set_capture_target_for_virtual_display(&session);
+    set_capture_target_for_virtual_display(1, &session);
     Ok(session)
 }
 

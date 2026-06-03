@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, OnceLock};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -7,14 +10,20 @@ pub enum InputEvent {
     PointerMove {
         x: f64,
         y: f64,
+        #[serde(default)]
+        screen: Option<u8>,
     },
     PointerButton {
         button: PointerButton,
         pressed: bool,
+        #[serde(default)]
+        screen: Option<u8>,
     },
     PointerWheel {
         delta_x: f64,
         delta_y: f64,
+        #[serde(default)]
+        screen: Option<u8>,
     },
     Key {
         code: KeyCode,
@@ -154,25 +163,43 @@ pub fn accept_batch(batch: InputEventBatch) -> InputBatchReceipt {
 }
 
 pub fn set_pointer_target_display(display_id: Option<u32>) {
-    *pointer_target_slot()
+    set_pointer_target_display_for_screen(1, display_id);
+}
+
+pub fn set_pointer_target_display_for_screen(screen_index: u8, display_id: Option<u32>) {
+    let mut targets = pointer_target_slot()
         .lock()
-        .expect("pointer target mutex should not be poisoned") = display_id;
+        .expect("pointer target mutex should not be poisoned");
+    let screen_index = screen_index.clamp(1, 3);
+    if let Some(display_id) = display_id {
+        targets.insert(screen_index, display_id);
+    } else {
+        targets.remove(&screen_index);
+    }
 }
 
 pub fn clear_pointer_target_display() {
-    set_pointer_target_display(None);
+    pointer_target_slot()
+        .lock()
+        .expect("pointer target mutex should not be poisoned")
+        .clear();
 }
 
-fn pointer_target_slot() -> &'static Mutex<Option<u32>> {
-    static TARGET: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
-    TARGET.get_or_init(|| Mutex::new(None))
+fn pointer_target_slot() -> &'static Mutex<HashMap<u8, u32>> {
+    static TARGET: OnceLock<Mutex<HashMap<u8, u32>>> = OnceLock::new();
+    TARGET.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[cfg(target_os = "macos")]
-fn active_pointer_target_display() -> Option<u32> {
-    *pointer_target_slot()
+fn active_pointer_target_display(screen_index: Option<u8>) -> Option<u32> {
+    let targets = pointer_target_slot()
         .lock()
-        .expect("pointer target mutex should not be poisoned")
+        .expect("pointer target mutex should not be poisoned");
+    let screen_index = screen_index.unwrap_or(1).clamp(1, 3);
+    targets
+        .get(&screen_index)
+        .copied()
+        .or_else(|| targets.get(&1).copied())
 }
 
 fn inject_events(events: &[InputEvent]) -> bool {
@@ -486,18 +513,28 @@ mod macos {
 
     fn inject_event(event: &InputEvent) -> bool {
         match event {
-            InputEvent::PointerMove { x, y } => post_mouse(
+            InputEvent::PointerMove { x, y, screen } => post_mouse(
                 K_CG_EVENT_MOUSE_MOVED,
-                point(*x, *y),
+                point(*x, *y, *screen),
                 K_CG_MOUSE_BUTTON_LEFT,
             ),
-            InputEvent::PointerButton { button, pressed } => {
+            InputEvent::PointerButton {
+                button,
+                pressed,
+                screen,
+            } => {
                 let (event_type, mouse_button) = mouse_button_event(button, *pressed);
-                post_mouse(event_type, last_point(), mouse_button)
+                let point = if let Some(screen) = screen {
+                    last_point_for_screen(*screen)
+                } else {
+                    last_point()
+                };
+                post_mouse(event_type, point, mouse_button)
             }
             InputEvent::PointerWheel {
                 delta_x: _,
                 delta_y,
+                screen: _,
             } => post_scroll(*delta_y),
             InputEvent::Key { code, pressed, .. } => macos_key_code_for_physical(&code.physical)
                 .is_some_and(|key_code| post_key(key_code, *pressed)),
@@ -505,10 +542,10 @@ mod macos {
         }
     }
 
-    fn point(x: f64, y: f64) -> CGPoint {
+    fn point(x: f64, y: f64, screen: Option<u8>) -> CGPoint {
         let display = pointer_target_display_for_id(
             &active_displays(),
-            super::active_pointer_target_display(),
+            super::active_pointer_target_display(screen),
         )
         .unwrap_or(PointerDisplay {
             id: 0,
@@ -521,7 +558,7 @@ mod macos {
         let (x, y) = normalized_point_on_display(display, x, y);
         let point = CGPoint { x, y };
 
-        *last_point_state()
+        *last_point_state(screen.unwrap_or(1))
             .lock()
             .expect("last pointer state should not be poisoned") = point;
 
@@ -555,14 +592,32 @@ mod macos {
     }
 
     fn last_point() -> CGPoint {
-        *last_point_state()
+        *last_point_state(1)
             .lock()
             .expect("last pointer state should not be poisoned")
     }
 
-    fn last_point_state() -> &'static Mutex<CGPoint> {
-        static LAST_POINT: OnceLock<Mutex<CGPoint>> = OnceLock::new();
-        LAST_POINT.get_or_init(|| Mutex::new(CGPoint { x: 0.0, y: 0.0 }))
+    fn last_point_for_screen(screen: u8) -> CGPoint {
+        *last_point_state(screen)
+            .lock()
+            .expect("last pointer state should not be poisoned")
+    }
+
+    fn last_point_state(screen: u8) -> &'static Mutex<CGPoint> {
+        match screen.clamp(1, 3) {
+            2 => {
+                static LAST_POINT_2: OnceLock<Mutex<CGPoint>> = OnceLock::new();
+                LAST_POINT_2.get_or_init(|| Mutex::new(CGPoint { x: 0.0, y: 0.0 }))
+            }
+            3 => {
+                static LAST_POINT_3: OnceLock<Mutex<CGPoint>> = OnceLock::new();
+                LAST_POINT_3.get_or_init(|| Mutex::new(CGPoint { x: 0.0, y: 0.0 }))
+            }
+            _ => {
+                static LAST_POINT_1: OnceLock<Mutex<CGPoint>> = OnceLock::new();
+                LAST_POINT_1.get_or_init(|| Mutex::new(CGPoint { x: 0.0, y: 0.0 }))
+            }
+        }
     }
 
     fn mouse_button_event(button: &PointerButton, pressed: bool) -> (u32, u32) {
@@ -667,7 +722,14 @@ mod tests {
             batch_id: "too-large".into(),
             sequence: 1,
             source_peer_id: None,
-            events: vec![InputEvent::PointerMove { x: 0.0, y: 0.0 }; MAX_EVENTS_PER_BATCH + 1],
+            events: vec![
+                InputEvent::PointerMove {
+                    x: 0.0,
+                    y: 0.0,
+                    screen: None,
+                };
+                MAX_EVENTS_PER_BATCH + 1
+            ],
         };
 
         let receipt = accept_batch(batch);
@@ -682,6 +744,22 @@ mod tests {
         assert_eq!(macos_key_code_for_physical("Space"), Some(49));
         assert_eq!(macos_key_code_for_physical("ArrowRight"), Some(124));
         assert_eq!(macos_key_code_for_physical("UnknownKey"), None);
+    }
+
+    #[test]
+    fn deserializes_pointer_input_with_screen_index() {
+        let event: InputEvent =
+            serde_json::from_str(r#"{"type":"pointerMove","x":0.25,"y":0.75,"screen":2}"#)
+                .expect("event should deserialize");
+
+        assert_eq!(
+            event,
+            InputEvent::PointerMove {
+                x: 0.25,
+                y: 0.75,
+                screen: Some(2),
+            }
+        );
     }
 
     #[test]

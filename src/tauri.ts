@@ -208,6 +208,7 @@ export function openDisplayWindow(request: DisplayWindowRequest) {
       window: 'display',
       peerId: request.peerId,
       peerAddress: request.peerAddress,
+      screenEndpoints: JSON.stringify(request.screenEndpoints ?? []),
       controlAddress: request.controlAddress,
       videoSessionId: request.videoSessionId ?? '',
       videoTransport: request.videoTransport ?? 'H.264 LAN stream',
@@ -351,7 +352,9 @@ export type HostDisplayPrepareResponse = {
   ok: boolean;
   frameUrl: string;
   h264Stream: H264StreamSession | null;
+  h264Streams: H264StreamSession[];
   virtualDisplay: VirtualDisplaySession | null;
+  virtualDisplays: VirtualDisplaySession[];
   message: string;
 };
 
@@ -359,6 +362,7 @@ export type H264StreamSession = {
   active: boolean;
   endpoint: string;
   port: number;
+  screenIndex: number;
   transport: string;
   codec: string;
   targetFps: number;
@@ -368,12 +372,13 @@ export type H264StreamSession = {
 
 export async function prepareRemoteHostDisplay(
   controlAddress: string,
-  request: Pick<VirtualDisplayRequest, 'width' | 'height' | 'refreshHz'> & { quality: StreamState['quality'] },
+  request: Pick<VirtualDisplayRequest, 'width' | 'height' | 'refreshHz'> & { quality: StreamState['quality']; screenCount?: number },
 ) {
   const url = new URL('/prepare-host-display', controlAddress);
   url.searchParams.set('width', String(request.width));
   url.searchParams.set('height', String(request.height));
   url.searchParams.set('refreshHz', String(request.refreshHz));
+  url.searchParams.set('screens', String(Math.max(1, Math.min(Number(request.screenCount ?? 1), 3))));
   url.searchParams.set('quality', request.quality);
 
   const response = await fetch(url.toString(), { cache: 'no-store' });

@@ -274,18 +274,29 @@ function ControlApp() {
         width: targetMode.width,
         height: targetMode.height,
         refreshHz: 60,
+        screenCount: Math.max(screenCount, 1),
         quality,
       });
 
-      if (preparedHost.h264Stream?.endpoint) {
-        const h264Endpoint = endpointForControlHost(preparedHost.h264Stream.endpoint, controlAddress);
+      const preparedStreams = preparedHost.h264Streams?.length
+        ? preparedHost.h264Streams
+        : preparedHost.h264Stream
+          ? [preparedHost.h264Stream]
+          : [];
+
+      if (preparedStreams.length > 0) {
+        const screenEndpoints = preparedStreams
+          .sort((left, right) => (left.screenIndex || 1) - (right.screenIndex || 1))
+          .map((stream) => endpointForControlHost(stream.endpoint, controlAddress));
+        const h264Endpoint = screenEndpoints[0] ?? endpointForControlHost(preparedStreams[0].endpoint, controlAddress);
         const request: DisplayWindowRequest = {
           peerId: peer.id,
           peerAddress: h264Endpoint,
+          screenEndpoints,
           controlAddress,
           videoSessionId: `h264-${Date.now()}`,
-          videoTransport: preparedHost.h264Stream.transport,
-          videoCodec: preparedHost.h264Stream.codec,
+          videoTransport: preparedStreams[0].transport,
+          videoCodec: preparedStreams[0].codec,
           screenCount: Math.max(screenCount, 1),
           quality,
         };
@@ -949,6 +960,10 @@ function DisplayWindow() {
     }
   }
 
+  function endpointForScreen(screen: number) {
+    return config.screenEndpoints?.[screen - 1] || config.peerAddress;
+  }
+
   function sendInputEvents(events: Array<Record<string, unknown>>) {
     const inputUrl = remoteControlUrl(config.controlAddress, '/input-events');
     if (!inputUrl || events.length === 0) return;
@@ -1019,22 +1034,22 @@ function DisplayWindow() {
               (event.currentTarget.closest('.display-window-shell') as HTMLElement | null)?.focus();
               event.currentTarget.setPointerCapture(event.pointerId);
               sendInputEvents([
-                { type: 'pointerMove', ...pointerPosition(event) },
-                { type: 'pointerButton', button: pointerButtonName(event.button), pressed: true },
+                { type: 'pointerMove', ...pointerPosition(event), screen },
+                { type: 'pointerButton', button: pointerButtonName(event.button), pressed: true, screen },
               ]);
             }}
-            onPointerMove={(event) => sendInputEvents([{ type: 'pointerMove', ...pointerPosition(event) }])}
+            onPointerMove={(event) => sendInputEvents([{ type: 'pointerMove', ...pointerPosition(event), screen }])}
             onPointerUp={(event) => {
               sendInputEvents([
-                { type: 'pointerMove', ...pointerPosition(event) },
-                { type: 'pointerButton', button: pointerButtonName(event.button), pressed: false },
+                { type: 'pointerMove', ...pointerPosition(event), screen },
+                { type: 'pointerButton', button: pointerButtonName(event.button), pressed: false, screen },
               ]);
             }}
-            onWheel={(event) => sendInputEvents([{ type: 'pointerWheel', deltaX: event.deltaX, deltaY: event.deltaY }])}
+            onWheel={(event) => sendInputEvents([{ type: 'pointerWheel', deltaX: event.deltaX, deltaY: event.deltaY, screen }])}
           >
             {isH264Session && (
               <H264Canvas
-                endpoint={config.peerAddress}
+                endpoint={endpointForScreen(screen)}
                 label={`PaneLink remote display ${screen}`}
                 onError={setControlError}
               />
@@ -1279,6 +1294,7 @@ function readDisplayWindowConfig(): DisplayWindowRequest {
     ? {
         peerId: params.get('peerId') ?? 'unknown',
         peerAddress: params.get('peerAddress') ?? '',
+        screenEndpoints: parseScreenEndpoints(params.get('screenEndpoints')),
         controlAddress: params.get('controlAddress') ?? '',
         videoSessionId: params.get('videoSessionId') ?? '',
         videoTransport: params.get('videoTransport') ?? 'H.264 LAN stream',
@@ -1308,6 +1324,7 @@ function normalizeDisplayWindowRequest(request: Partial<DisplayWindowRequest>): 
   return {
     peerId: request.peerId ?? 'unknown',
     peerAddress: request.peerAddress ?? '',
+    screenEndpoints: Array.isArray(request.screenEndpoints) ? request.screenEndpoints.filter(Boolean) : [],
     controlAddress: request.controlAddress ?? '',
     videoSessionId: request.videoSessionId ?? '',
     videoTransport: request.videoTransport ?? 'H.264 LAN stream',
@@ -1315,6 +1332,16 @@ function normalizeDisplayWindowRequest(request: Partial<DisplayWindowRequest>): 
     screenCount: Number(request.screenCount ?? 1),
     quality: request.quality ?? 'Low latency',
   };
+}
+
+function parseScreenEndpoints(value: string | null) {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
+  } catch {
+    return value.split('|').filter(Boolean);
+  }
 }
 
 function controlUrlForPeer(peer: Peer) {

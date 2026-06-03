@@ -201,6 +201,15 @@ pub fn capture_primary_png() -> Result<Vec<u8>, String> {
 
 pub fn capture_primary_rgba() -> Result<CapturedFrame, String> {
     let image = capture_primary_image()?;
+    rgba_frame_from_image(image)
+}
+
+pub fn capture_rgba_for_target(target: CaptureTarget) -> Result<CapturedFrame, String> {
+    let image = capture_image_for_target(&normalize_capture_target(target))?;
+    rgba_frame_from_image(image)
+}
+
+fn rgba_frame_from_image(image: xcap::image::RgbaImage) -> Result<CapturedFrame, String> {
     let width = image.width();
     let height = image.height();
 
@@ -212,10 +221,14 @@ pub fn capture_primary_rgba() -> Result<CapturedFrame, String> {
 }
 
 fn capture_primary_image() -> Result<xcap::image::RgbaImage, String> {
+    let target = active_capture_target();
+    capture_image_for_target(&target)
+}
+
+fn capture_image_for_target(target: &CaptureTarget) -> Result<xcap::image::RgbaImage, String> {
     let monitors = Monitor::all().map_err(|error| format!("Could not list monitors: {error}"))?;
     let descriptors = monitor_descriptors(&monitors);
-    let target = active_capture_target();
-    let monitor_index = preferred_monitor_index(&descriptors, &target)
+    let monitor_index = preferred_monitor_index(&descriptors, target)
         .or_else(|| (!monitors.is_empty()).then_some(0))
         .ok_or_else(|| "No monitor found to capture".to_string())?;
     let monitor = monitors
