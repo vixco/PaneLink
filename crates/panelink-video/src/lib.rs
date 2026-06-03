@@ -153,7 +153,7 @@ pub fn start_video_session(request: VideoSessionRequest) -> Result<VideoSession,
     }
 
     let mut session = plan_video_session(request)?;
-    let stream = start_h264_stream_server(H264StreamRequest {
+    let stream = configure_h264_control_stream(H264StreamRequest {
         width: session.width,
         height: session.height,
         target_fps: session.target_fps,
@@ -177,7 +177,7 @@ pub fn plan_video_session(request: VideoSessionRequest) -> Result<VideoSession, 
     let codec = codec_for_quality(quality);
     let id = format!("video-{}-{}", request.source_peer_id, now_unix_ms());
     let endpoint = format!(
-        "http://127.0.0.1:{H264_STREAM_PORT}/h264?session={}&screens={}&codec={}&fps={}",
+        "http://127.0.0.1:{VIDEO_SIGNALING_PORT}{H264_STREAM_PATH}?session={}&screens={}&codec={}&fps={}",
         request.screen_count,
         percent_encode(&id),
         percent_encode(codec),
@@ -652,7 +652,7 @@ mod tests {
         .expect("video session should start");
 
         assert_eq!(session.transport, "H.264 LAN stream");
-        assert!(session.endpoint.starts_with("http://127.0.0.1:48172/h264"));
+        assert!(session.endpoint.starts_with("http://127.0.0.1:48170/h264"));
         assert_eq!(session.codec, "H.264 OpenH264");
         assert!(!session.endpoint.to_lowercase().contains("png"));
         assert!(!session.endpoint.to_lowercase().contains("/frame"));
@@ -742,7 +742,7 @@ mod tests {
             let session = result.expect("macOS should start the OpenH264 source stream");
             assert_eq!(session.transport, "H.264 LAN stream");
             assert_eq!(session.codec, "H.264 OpenH264");
-            assert!(session.endpoint.contains(":48172/h264"));
+            assert!(session.endpoint.contains(":48170/h264"));
             return;
         }
 

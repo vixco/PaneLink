@@ -282,7 +282,7 @@ export function startVideoSession(request: VideoSessionRequest) {
   const fallback: VideoSession = {
     id: `browser-video-${Date.now()}`,
     active: true,
-    endpoint: `http://127.0.0.1:48172/h264?screens=${request.screenCount}`,
+    endpoint: `http://127.0.0.1:48170/h264?screens=${request.screenCount}`,
     controlAddress: request.controlAddress,
     transport: 'H.264 LAN stream',
     codec: 'H.264 OpenH264',

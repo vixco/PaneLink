@@ -269,32 +269,32 @@ function ControlApp() {
     const controlAddress = shouldOpenOnReceiver ? await getControlServerLanUrl(peer.address) : controlUrlForPeer(peer);
     const targetMode = modeFromScreen(screens[Math.max(0, Math.min(screenCount, screens.length) - 1)]);
 
-    if (displayPipeline.kind === 'frame-fallback') {
-      if (shouldUseRemoteMacSource) {
-        const preparedHost = await prepareRemoteHostDisplay(controlAddress, {
-          width: targetMode.width,
-          height: targetMode.height,
-          refreshHz: 60,
+    if (shouldUseRemoteMacSource) {
+      const preparedHost = await prepareRemoteHostDisplay(controlAddress, {
+        width: targetMode.width,
+        height: targetMode.height,
+        refreshHz: 60,
+        quality,
+      });
+
+      if (preparedHost.h264Stream?.endpoint) {
+        const h264Endpoint = endpointForControlHost(preparedHost.h264Stream.endpoint, controlAddress);
+        const request: DisplayWindowRequest = {
+          peerId: peer.id,
+          peerAddress: h264Endpoint,
+          controlAddress,
+          videoSessionId: `h264-${Date.now()}`,
+          videoTransport: preparedHost.h264Stream.transport,
+          videoCodec: preparedHost.h264Stream.codec,
+          screenCount: Math.max(screenCount, 1),
           quality,
-        });
+        };
 
-        if (preparedHost.h264Stream?.endpoint) {
-          const h264Endpoint = endpointForControlHost(preparedHost.h264Stream.endpoint, controlAddress);
-          const request: DisplayWindowRequest = {
-            peerId: peer.id,
-            peerAddress: h264Endpoint,
-            controlAddress,
-            videoSessionId: `h264-${Date.now()}`,
-            videoTransport: preparedHost.h264Stream.transport,
-            videoCodec: preparedHost.h264Stream.codec,
-            screenCount,
-            quality,
-          };
-
-          return openDisplayWindow(request);
-        }
+        return openDisplayWindow(request);
       }
+    }
 
+    if (displayPipeline.kind === 'frame-fallback') {
       const frameUrl = shouldUseRemoteMacSource ? frameUrlForPeer(peer) : await getFrameServerLanUrl(peer.address);
       const request: DisplayWindowRequest = {
         peerId: shouldUseRemoteMacSource ? peer.id : localPeerId,
@@ -324,9 +324,12 @@ function ControlApp() {
       refreshHz: targetMode.refreshHz,
       controlAddress,
     });
+    const videoEndpoint = shouldOpenOnReceiver
+      ? endpointForControlHost(videoSession.endpoint, controlAddress)
+      : videoSession.endpoint;
     const request: DisplayWindowRequest = {
       peerId: shouldOpenOnReceiver ? localPeerId : peer.id,
-      peerAddress: videoSession.endpoint,
+      peerAddress: videoEndpoint,
       controlAddress: videoSession.controlAddress,
       videoSessionId: videoSession.id,
       videoTransport: videoSession.transport,
