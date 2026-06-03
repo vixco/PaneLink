@@ -43,6 +43,7 @@ import {
 } from './tauri';
 import { selectDisplayPipeline } from './display-routing';
 import { framePollDelayMs } from './frame-timing';
+import { h264DecoderConfig, isH264KeyPacket, readH264Packets } from './h264-decoder';
 import { createManualPeer } from './manual-peer';
 import { endpointForControlHost, isH264StreamEndpoint } from './video-endpoint';
 import type {
@@ -1043,6 +1044,13 @@ function DisplayWindow() {
                 <small>{config.peerAddress || 'Geen video endpoint ontvangen'}</small>
               </div>
             )}
+            {hasVideoSession && controlError && (
+              <div className="display-window-placeholder error">
+                <Loader2 className="spin" size={24} />
+                <strong>Video decoder fout</strong>
+                <small>{controlError}</small>
+              </div>
+            )}
             {(hasVideoSession || isFrameSession) && (
               <div className="display-window-label">
                 <span>Screen {screen}</span>
@@ -1124,10 +1132,7 @@ function H264Canvas({
       },
     });
 
-    decoder.configure({
-      codec: 'avc1.42E01F',
-      optimizeForLatency: true,
-    });
+    decoder.configure(h264DecoderConfig());
 
     async function stream() {
       try {
@@ -1189,43 +1194,6 @@ function concatBytes(left: Uint8Array, right: Uint8Array) {
   output.set(left, 0);
   output.set(right, left.length);
   return output;
-}
-
-function readH264Packets(buffer: Uint8Array) {
-  const packets: Uint8Array[] = [];
-  let offset = 0;
-
-  while (buffer.length - offset >= 4) {
-    const length = new DataView(buffer.buffer, buffer.byteOffset + offset, 4).getUint32(0, false);
-    if (buffer.length - offset < 4 + length) {
-      break;
-    }
-    packets.push(buffer.slice(offset + 4, offset + 4 + length));
-    offset += 4 + length;
-  }
-
-  return {
-    packets,
-    remaining: buffer.slice(offset),
-  };
-}
-
-function isH264KeyPacket(packet: Uint8Array) {
-  for (let index = 0; index + 3 < packet.length; index += 1) {
-    if (index + 4 < packet.length && packet[index] === 0 && packet[index + 1] === 0 && packet[index + 2] === 0 && packet[index + 3] === 1) {
-      const nalType = packet[index + 4] & 0x1f;
-      if (nalType === 5 || nalType === 7) {
-        return true;
-      }
-    } else if (packet[index] === 0 && packet[index + 1] === 0 && packet[index + 2] === 1) {
-      const nalType = packet[index + 3] & 0x1f;
-      if (nalType === 5 || nalType === 7) {
-        return true;
-      }
-    }
-  }
-
-  return false;
 }
 
 function DisplayBoot() {
