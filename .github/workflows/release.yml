@@ -1,9 +1,6 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_run:
     workflows: ["CI"]
     types: [completed]
@@ -11,6 +8,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha || github.ref }}
+  cancel-in-progress: false
 
 jobs:
   prepare-release:
