@@ -955,6 +955,7 @@ fn ensure_host_virtual_display(
         .map_err(|_| "Host virtual display state is unavailable".to_string())?;
 
     if let Some(session) = slot.as_ref().filter(|session| session.active) {
+        set_capture_target_for_virtual_display(session);
         return Ok(session.clone());
     }
 
@@ -966,9 +967,20 @@ fn ensure_host_virtual_display(
             refresh_hz: request.refresh_hz,
         },
     )?;
+    set_capture_target_for_virtual_display(&session);
     *slot = Some(session.clone());
 
     Ok(session)
+}
+
+fn set_capture_target_for_virtual_display(
+    session: &panelink_virtual_display::VirtualDisplaySession,
+) {
+    panelink_capture::set_capture_target(panelink_capture::CaptureTarget {
+        display_id: session.platform_display_id,
+        display_name: Some(session.display_name.clone()),
+    });
+    panelink_input::set_pointer_target_display(session.platform_display_id);
 }
 
 fn host_virtual_display_slot(
@@ -1338,14 +1350,19 @@ fn get_virtual_display_backend() -> panelink_virtual_display::VirtualDisplayBack
 fn create_virtual_display(
     request: panelink_virtual_display::VirtualDisplayRequest,
 ) -> Result<panelink_virtual_display::VirtualDisplaySession, String> {
-    panelink_virtual_display::create_virtual_display(request)
+    let session = panelink_virtual_display::create_virtual_display(request)?;
+    set_capture_target_for_virtual_display(&session);
+    Ok(session)
 }
 
 #[tauri::command]
 fn destroy_virtual_display(
     id: String,
 ) -> Result<panelink_virtual_display::VirtualDisplaySession, String> {
-    panelink_virtual_display::destroy_virtual_display(id)
+    let session = panelink_virtual_display::destroy_virtual_display(id)?;
+    panelink_capture::clear_capture_target();
+    panelink_input::clear_pointer_target_display();
+    Ok(session)
 }
 
 #[tauri::command]

@@ -53,10 +53,16 @@ pub struct VirtualDisplaySession {
     pub active: bool,
     pub backend: String,
     pub display_name: String,
+    pub platform_display_id: Option<u32>,
     pub width: u32,
     pub height: u32,
     pub refresh_hz: u16,
     pub message: String,
+}
+
+struct PlatformVirtualDisplay {
+    id: String,
+    display_id: Option<u32>,
 }
 
 pub fn backend_report() -> VirtualDisplayBackendReport {
@@ -73,13 +79,14 @@ pub fn create_virtual_display(
         return Err(report.message);
     }
 
-    let id = create_platform_virtual_display(&request, &report)?;
+    let platform_display = create_platform_virtual_display(&request, &report)?;
 
     Ok(VirtualDisplaySession {
-        id,
+        id: platform_display.id,
         active: true,
         backend: report.backend,
         display_name: request.name,
+        platform_display_id: platform_display.display_id,
         width: request.width,
         height: request.height,
         refresh_hz: request.refresh_hz,
@@ -101,6 +108,7 @@ pub fn destroy_virtual_display(id: String) -> Result<VirtualDisplaySession, Stri
         active: false,
         backend: backend_report().backend,
         display_name: "PaneLink Virtual Display".into(),
+        platform_display_id: None,
         width: DEFAULT_WIDTH,
         height: DEFAULT_HEIGHT,
         refresh_hz: DEFAULT_REFRESH_HZ,
@@ -177,14 +185,17 @@ fn native_macos_backend_report() -> VirtualDisplayBackendReport {
 fn create_platform_virtual_display(
     _request: &VirtualDisplayRequest,
     _report: &VirtualDisplayBackendReport,
-) -> Result<String, String> {
+) -> Result<PlatformVirtualDisplay, String> {
     #[cfg(target_os = "macos")]
     {
         return macos::create_virtual_display(_request);
     }
 
     #[allow(unreachable_code)]
-    Ok(Uuid::new_v4().to_string())
+    Ok(PlatformVirtualDisplay {
+        id: Uuid::new_v4().to_string(),
+        display_id: None,
+    })
 }
 
 fn release_platform_virtual_display(_id: &str) -> Result<(), String> {
@@ -199,7 +210,7 @@ fn release_platform_virtual_display(_id: &str) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::VirtualDisplayRequest;
+    use super::{PlatformVirtualDisplay, VirtualDisplayRequest};
     use std::{
         collections::HashMap,
         ffi::{c_char, c_void, CString},
@@ -263,7 +274,9 @@ mod macos {
         fn CGCancelDisplayConfiguration(config: *mut c_void) -> i32;
     }
 
-    pub fn create_virtual_display(request: &VirtualDisplayRequest) -> Result<String, String> {
+    pub fn create_virtual_display(
+        request: &VirtualDisplayRequest,
+    ) -> Result<PlatformVirtualDisplay, String> {
         let (display, display_id) = unsafe { create_native_display(request)? };
         let id = Uuid::new_v4().to_string();
 
@@ -282,7 +295,10 @@ mod macos {
                 },
             );
 
-        Ok(id)
+        Ok(PlatformVirtualDisplay {
+            id,
+            display_id: Some(display_id),
+        })
     }
 
     pub fn release_virtual_display(id: &str) -> Result<(), String> {

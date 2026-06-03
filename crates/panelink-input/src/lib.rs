@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -152,6 +153,28 @@ pub fn accept_batch(batch: InputEventBatch) -> InputBatchReceipt {
     }
 }
 
+pub fn set_pointer_target_display(display_id: Option<u32>) {
+    *pointer_target_slot()
+        .lock()
+        .expect("pointer target mutex should not be poisoned") = display_id;
+}
+
+pub fn clear_pointer_target_display() {
+    set_pointer_target_display(None);
+}
+
+fn pointer_target_slot() -> &'static Mutex<Option<u32>> {
+    static TARGET: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
+    TARGET.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(target_os = "macos")]
+fn active_pointer_target_display() -> Option<u32> {
+    *pointer_target_slot()
+        .lock()
+        .expect("pointer target mutex should not be poisoned")
+}
+
 fn inject_events(events: &[InputEvent]) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -206,7 +229,7 @@ fn platform_permissions() -> Vec<InputPermission> {
         vec![InputPermission {
             key: "accessibility".into(),
             label: "Accessibility".into(),
-            status: InputPermissionStatus::Required,
+            status: macos_accessibility_status(),
             detail: "Required before CGEvent can control pointer and keyboard input.".into(),
         }]
     } else if cfg!(target_os = "linux") {
@@ -223,6 +246,22 @@ fn platform_permissions() -> Vec<InputPermission> {
             status: InputPermissionStatus::Granted,
             detail: "The current platform does not require an app permission prompt.".into(),
         }]
+    }
+}
+
+fn macos_accessibility_status() -> InputPermissionStatus {
+    #[cfg(target_os = "macos")]
+    {
+        if macos::accessibility_trusted() {
+            InputPermissionStatus::Granted
+        } else {
+            InputPermissionStatus::Required
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        InputPermissionStatus::Unsupported
     }
 }
 
@@ -299,7 +338,20 @@ fn macos_key_code_for_physical(physical: &str) -> Option<u16> {
 }
 
 #[cfg(any(test, target_os = "macos"))]
-fn pointer_target_display(displays: &[PointerDisplay]) -> Option<PointerDisplay> {
+fn pointer_target_display_for_id(
+    displays: &[PointerDisplay],
+    target_id: Option<u32>,
+) -> Option<PointerDisplay> {
+    if let Some(target_id) = target_id {
+        if let Some(display) = displays
+            .iter()
+            .copied()
+            .find(|display| display.id == target_id)
+        {
+            return Some(display);
+        }
+    }
+
     displays
         .iter()
         .copied()
@@ -328,7 +380,7 @@ fn normalized_point_on_display(display: PointerDisplay, x: f64, y: f64) -> (f64,
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{
-        macos_key_code_for_physical, normalized_point_on_display, pointer_target_display,
+        macos_key_code_for_physical, normalized_point_on_display, pointer_target_display_for_id,
         InputEvent, PointerButton, PointerDisplay,
     };
     use std::{
@@ -404,12 +456,21 @@ mod macos {
         fn CGEventPost(tap: u32, event: CGEventRef);
     }
 
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
         fn CFRelease(value: CFTypeRef);
     }
 
     pub fn inject_events(events: &[InputEvent]) -> bool {
+        if !accessibility_trusted() {
+            return false;
+        }
+
         let mut ok = true;
 
         for event in events {
@@ -417,6 +478,10 @@ mod macos {
         }
 
         ok
+    }
+
+    pub fn accessibility_trusted() -> bool {
+        unsafe { AXIsProcessTrusted() }
     }
 
     fn inject_event(event: &InputEvent) -> bool {
@@ -441,7 +506,11 @@ mod macos {
     }
 
     fn point(x: f64, y: f64) -> CGPoint {
-        let display = pointer_target_display(&active_displays()).unwrap_or(PointerDisplay {
+        let display = pointer_target_display_for_id(
+            &active_displays(),
+            super::active_pointer_target_display(),
+        )
+        .unwrap_or(PointerDisplay {
             id: 0,
             primary: true,
             x: 0.0,
@@ -636,7 +705,45 @@ mod tests {
             },
         ];
 
-        let target = pointer_target_display(&displays).expect("display should be selected");
+        let target =
+            pointer_target_display_for_id(&displays, None).expect("display should be selected");
+        let point = normalized_point_on_display(target, 0.5, 0.5);
+
+        assert_eq!(target.id, 2);
+        assert_eq!(point, (2472.0, 540.0));
+    }
+
+    #[test]
+    fn pointer_input_prefers_explicit_virtual_display_id() {
+        let displays = [
+            PointerDisplay {
+                id: 1,
+                primary: true,
+                x: 0.0,
+                y: 0.0,
+                width: 1512.0,
+                height: 982.0,
+            },
+            PointerDisplay {
+                id: 2,
+                primary: false,
+                x: 1512.0,
+                y: 0.0,
+                width: 1920.0,
+                height: 1080.0,
+            },
+            PointerDisplay {
+                id: 3,
+                primary: false,
+                x: 3432.0,
+                y: 0.0,
+                width: 2560.0,
+                height: 1440.0,
+            },
+        ];
+
+        let target =
+            pointer_target_display_for_id(&displays, Some(2)).expect("display should be selected");
         let point = normalized_point_on_display(target, 0.5, 0.5);
 
         assert_eq!(target.id, 2);

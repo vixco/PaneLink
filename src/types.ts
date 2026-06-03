@@ -148,6 +148,7 @@ export type VirtualDisplaySession = {
   active: boolean;
   backend: string;
   displayName: string;
+  platformDisplayId?: number | null;
   width: number;
   height: number;
   refreshHz: number;

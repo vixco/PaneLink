@@ -966,6 +966,26 @@ function DisplayWindow() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(batch),
       cache: 'no-store',
+    }).then(async (response) => {
+      const text = await response.text();
+      if (!response.ok) {
+        throw new Error(text || `Input forwarding failed with HTTP ${response.status}`);
+      }
+
+      const receipt = JSON.parse(text || '{}') as {
+        accepted?: boolean;
+        acceptedEvents?: number;
+        backend?: { name?: string; requiresPermission?: boolean };
+      };
+      if (receipt.accepted === false) {
+        const backendName = receipt.backend?.name ?? 'Mac input backend';
+        const permissionHint = receipt.backend?.requiresPermission
+          ? ' Geef PaneLink op de Mac Accessibility-toegang en start PaneLink opnieuw.'
+          : '';
+        throw new Error(`${backendName} accepteerde de input niet.${permissionHint}`);
+      }
+
+      setControlError('');
     }).catch((error) => {
       setControlError(error instanceof Error ? error.message : String(error));
     });

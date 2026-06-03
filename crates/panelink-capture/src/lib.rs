@@ -3,7 +3,7 @@ use std::{
     io::Cursor,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, OnceLock, RwLock,
+        Arc, Mutex, OnceLock, RwLock,
     },
     thread,
     time::Duration,
@@ -28,8 +28,15 @@ type SharedFrameCache = Arc<RwLock<FrameCache>>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MonitorDescriptor {
     index: usize,
+    id: Option<u32>,
     name: String,
     is_primary: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CaptureTarget {
+    pub display_id: Option<u32>,
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +107,40 @@ pub fn start_frame_server() -> Result<u16, String> {
             Ok(FRAME_SERVER_PORT)
         })
         .clone()
+}
+
+pub fn set_capture_target(target: CaptureTarget) {
+    *capture_target_slot()
+        .lock()
+        .expect("capture target mutex should not be poisoned") = normalize_capture_target(target);
+}
+
+pub fn clear_capture_target() {
+    *capture_target_slot()
+        .lock()
+        .expect("capture target mutex should not be poisoned") = CaptureTarget::default();
+}
+
+fn capture_target_slot() -> &'static Mutex<CaptureTarget> {
+    static TARGET: OnceLock<Mutex<CaptureTarget>> = OnceLock::new();
+    TARGET.get_or_init(|| Mutex::new(CaptureTarget::default()))
+}
+
+fn active_capture_target() -> CaptureTarget {
+    capture_target_slot()
+        .lock()
+        .expect("capture target mutex should not be poisoned")
+        .clone()
+}
+
+fn normalize_capture_target(target: CaptureTarget) -> CaptureTarget {
+    CaptureTarget {
+        display_id: target.display_id,
+        display_name: target
+            .display_name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty()),
+    }
 }
 
 fn start_capture_loop(cache: SharedFrameCache) -> Result<(), String> {
@@ -173,7 +214,8 @@ pub fn capture_primary_rgba() -> Result<CapturedFrame, String> {
 fn capture_primary_image() -> Result<xcap::image::RgbaImage, String> {
     let monitors = Monitor::all().map_err(|error| format!("Could not list monitors: {error}"))?;
     let descriptors = monitor_descriptors(&monitors);
-    let monitor_index = preferred_monitor_index(&descriptors)
+    let target = active_capture_target();
+    let monitor_index = preferred_monitor_index(&descriptors, &target)
         .or_else(|| (!monitors.is_empty()).then_some(0))
         .ok_or_else(|| "No monitor found to capture".to_string())?;
     let monitor = monitors
@@ -192,13 +234,41 @@ fn monitor_descriptors(monitors: &[Monitor]) -> Vec<MonitorDescriptor> {
         .enumerate()
         .map(|(index, monitor)| MonitorDescriptor {
             index,
+            id: monitor.id().ok(),
             name: monitor.name().unwrap_or_default(),
             is_primary: monitor.is_primary().unwrap_or(false),
         })
         .collect()
 }
 
-fn preferred_monitor_index(monitors: &[MonitorDescriptor]) -> Option<usize> {
+fn preferred_monitor_index(
+    monitors: &[MonitorDescriptor],
+    target: &CaptureTarget,
+) -> Option<usize> {
+    if let Some(display_id) = target.display_id {
+        if let Some(monitor) = monitors
+            .iter()
+            .find(|monitor| monitor.id == Some(display_id))
+        {
+            return Some(monitor.index);
+        }
+    }
+
+    if let Some(display_name) = target.display_name.as_deref() {
+        let display_name = display_name.to_ascii_lowercase();
+        if let Some(monitor) = monitors
+            .iter()
+            .find(|monitor| monitor.name.to_ascii_lowercase() == display_name)
+            .or_else(|| {
+                monitors
+                    .iter()
+                    .find(|monitor| monitor.name.to_ascii_lowercase().contains(&display_name))
+            })
+        {
+            return Some(monitor.index);
+        }
+    }
+
     monitors
         .iter()
         .find(|monitor| {
@@ -439,22 +509,57 @@ mod tests {
         let monitors = [
             MonitorDescriptor {
                 index: 0,
+                id: Some(100),
                 name: "Built-in Retina Display".into(),
                 is_primary: true,
             },
             MonitorDescriptor {
                 index: 1,
+                id: Some(101),
                 name: "Dell U2723QE".into(),
                 is_primary: false,
             },
             MonitorDescriptor {
                 index: 2,
+                id: Some(102),
                 name: "PaneLink Virtual Display".into(),
                 is_primary: false,
             },
         ];
 
-        assert_eq!(preferred_monitor_index(&monitors), Some(2));
+        assert_eq!(
+            preferred_monitor_index(&monitors, &CaptureTarget::default()),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn capture_prefers_explicit_virtual_display_id() {
+        let monitors = [
+            MonitorDescriptor {
+                index: 0,
+                id: Some(100),
+                name: "Built-in Retina Display".into(),
+                is_primary: true,
+            },
+            MonitorDescriptor {
+                index: 1,
+                id: Some(101),
+                name: "PaneLink Virtual Display".into(),
+                is_primary: false,
+            },
+        ];
+
+        assert_eq!(
+            preferred_monitor_index(
+                &monitors,
+                &CaptureTarget {
+                    display_id: Some(101),
+                    display_name: Some("Different Name".into()),
+                },
+            ),
+            Some(1)
+        );
     }
 
     #[test]
@@ -462,16 +567,21 @@ mod tests {
         let monitors = [
             MonitorDescriptor {
                 index: 0,
+                id: Some(100),
                 name: "Built-in Retina Display".into(),
                 is_primary: true,
             },
             MonitorDescriptor {
                 index: 1,
+                id: Some(101),
                 name: "Extended Display".into(),
                 is_primary: false,
             },
         ];
 
-        assert_eq!(preferred_monitor_index(&monitors), Some(1));
+        assert_eq!(
+            preferred_monitor_index(&monitors, &CaptureTarget::default()),
+            Some(1)
+        );
     }
 }
