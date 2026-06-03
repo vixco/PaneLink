@@ -14,7 +14,7 @@ The current MVP creates a macOS PaneLink virtual display, streams that display t
 - Mac PaneLink virtual display creation through CoreGraphics.
 - Mac screen capture through the existing native capture backend, preferring the PaneLink virtual display.
 - Windows fullscreen/borderless display window.
-- H.264 OpenH264 frame streaming over LAN on port `48172`.
+- H.264 OpenH264 frame streaming over the control server on port `48170`.
 - PNG frame streaming fallback/debug path over LAN on port `48171`.
 - Mouse move, click, wheel, and keyboard event forwarding to the Mac host control server.
 - Basic pairing/trust UI, connect/disconnect UI, status messages, and setup actions.
@@ -40,7 +40,6 @@ The current MVP creates a macOS PaneLink virtual display, streams that display t
 - macOS host and Windows client on the same LAN
 - Firewall access for:
   - UDP/TCP `48170` for discovery and control
-  - TCP `48172` for H.264 video streaming
   - TCP `48171` for PNG fallback/debug frame streaming
 
 ## Fresh Clone Setup
@@ -127,7 +126,7 @@ Click **Add**, select the manual Mac peer, then click **Connect**.
 The Windows app opens a fullscreen display window and loads H.264 chunks from:
 
 ```text
-http://<mac-lan-ip>:48172/h264
+http://<mac-lan-ip>:48170/h264
 ```
 
 Mouse and keyboard events from the Windows display window are sent back to:
@@ -147,7 +146,7 @@ If the Windows viewer says it cannot connect:
 - Try manual Mac IP instead of discovery.
 - On the Mac, confirm Screen Recording permission is granted.
 - On the Mac, confirm Accessibility permission is granted for input forwarding.
-- Confirm TCP `48172` is reachable from Windows to the Mac.
+- Confirm TCP `48170` is reachable from Windows to the Mac.
 
 If frames load but input does not work:
 

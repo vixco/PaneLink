@@ -19,6 +19,7 @@ use openh264::{
 
 pub const VIDEO_SIGNALING_PORT: u16 = 48170;
 pub const H264_STREAM_PORT: u16 = 48172;
+pub const H264_STREAM_PATH: &str = "/h264";
 const DEFAULT_H264_TARGET_FPS: u16 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,10 +203,7 @@ pub fn plan_video_session(request: VideoSessionRequest) -> Result<VideoSession, 
 }
 
 pub fn start_h264_stream_server(request: H264StreamRequest) -> Result<H264StreamSession, String> {
-    let request = normalized_h264_request(request);
-    *h264_config_slot()
-        .lock()
-        .map_err(|_| "H.264 stream configuration is unavailable".to_string())? = request.clone();
+    let request = set_active_h264_config(request)?;
 
     let port = h264_server_slot().get_or_init(start_h264_server).clone()?;
     Ok(H264StreamSession {
@@ -223,6 +221,39 @@ pub fn start_h264_stream_server(request: H264StreamRequest) -> Result<H264Stream
         target_bitrate_mbps: request.target_bitrate_mbps,
         message: "H.264 stream server is running.".into(),
     })
+}
+
+pub fn configure_h264_control_stream(
+    request: H264StreamRequest,
+) -> Result<H264StreamSession, String> {
+    let request = set_active_h264_config(request)?;
+
+    Ok(H264StreamSession {
+        active: true,
+        endpoint: format!(
+            "http://127.0.0.1:{VIDEO_SIGNALING_PORT}{H264_STREAM_PATH}?fps={}&bitrateMbps={}&quality={}",
+            request.target_fps,
+            request.target_bitrate_mbps,
+            percent_encode(&request.quality)
+        ),
+        port: VIDEO_SIGNALING_PORT,
+        transport: "H.264 LAN stream".into(),
+        codec: "H.264 OpenH264".into(),
+        target_fps: request.target_fps,
+        target_bitrate_mbps: request.target_bitrate_mbps,
+        message: "H.264 stream is available on the PaneLink control server.".into(),
+    })
+}
+
+pub fn respond_h264_stream_request(request: tiny_http::Request) {
+    match active_h264_config() {
+        Ok(config) => {
+            let _ = request.respond(h264_stream_response(config));
+        }
+        Err(error) => {
+            let _ = request.respond(text_response(error, StatusCode(500)));
+        }
+    }
 }
 
 pub fn current_video_session() -> Option<VideoSession> {
@@ -291,6 +322,15 @@ fn default_h264_request() -> H264StreamRequest {
     }
 }
 
+fn set_active_h264_config(request: H264StreamRequest) -> Result<H264StreamRequest, String> {
+    let request = normalized_h264_request(request);
+    *h264_config_slot()
+        .lock()
+        .map_err(|_| "H.264 stream configuration is unavailable".to_string())? = request.clone();
+
+    Ok(request)
+}
+
 fn normalized_h264_request(request: H264StreamRequest) -> H264StreamRequest {
     H264StreamRequest {
         width: request.width.clamp(640, 7680),
@@ -321,7 +361,7 @@ fn run_h264_server(server: Server) {
 
         if method == "OPTIONS" {
             let _ = request.respond(empty_response(StatusCode(204)));
-        } else if method == "GET" && path == "/h264" {
+        } else if method == "GET" && path == H264_STREAM_PATH {
             match active_h264_config() {
                 Ok(config) => {
                     let _ = request.respond(h264_stream_response(config));
@@ -611,6 +651,21 @@ mod tests {
         assert!(!session.endpoint.to_lowercase().contains("png"));
         assert!(!session.endpoint.to_lowercase().contains("/frame"));
         assert!(!session.control_address.contains("48171"));
+    }
+
+    #[test]
+    fn control_stream_uses_existing_control_port_to_avoid_extra_firewall_hole() {
+        let session = configure_h264_control_stream(H264StreamRequest {
+            width: 1920,
+            height: 1080,
+            target_fps: 60,
+            target_bitrate_mbps: 28,
+            quality: "Low latency".into(),
+        })
+        .expect("control stream should configure");
+
+        assert_eq!(session.port, VIDEO_SIGNALING_PORT);
+        assert!(session.endpoint.starts_with("http://127.0.0.1:48170/h264"));
     }
 
     #[test]

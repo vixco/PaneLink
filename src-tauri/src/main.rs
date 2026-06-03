@@ -858,6 +858,11 @@ fn run_remote_control_server(app: AppHandle, server: Server) {
         let method = request.method().as_str().to_string();
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or("/");
+        if method == "GET" && path == panelink_video::H264_STREAM_PATH {
+            panelink_video::respond_h264_stream_request(request);
+            continue;
+        }
+
         let response = if method == "OPTIONS" {
             text_control_response("", StatusCode(204))
         } else if matches!(method.as_str(), "GET" | "POST") && path == "/open-display" {
@@ -915,7 +920,7 @@ fn prepare_host_display(
     let virtual_display = ensure_host_virtual_display(&request)?;
     let port = panelink_capture::start_frame_server()?;
     let h264_stream =
-        panelink_video::start_h264_stream_server(panelink_video::H264StreamRequest {
+        panelink_video::configure_h264_control_stream(panelink_video::H264StreamRequest {
             width: request.width,
             height: request.height,
             target_fps: request.refresh_hz.min(60),
