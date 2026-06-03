@@ -665,8 +665,8 @@ mod tests {
     }
 
     #[test]
-    fn start_video_session_does_not_fake_a_missing_source_engine() {
-        let error = start_video_session(VideoSessionRequest {
+    fn start_video_session_matches_platform_source_capability() {
+        let result = start_video_session(VideoSessionRequest {
             source_peer_id: "mac".into(),
             receiver_peer_id: "windows".into(),
             screen_count: 1,
@@ -675,9 +675,21 @@ mod tests {
             height: 1080,
             refresh_hz: 120,
             control_address: "http://192.168.1.24:48170".into(),
-        })
-        .expect_err("missing native video engine must not create an active session");
+        });
 
-        assert!(error.contains("video engine"));
+        if cfg!(target_os = "macos") {
+            let session = result.expect("macOS should start the OpenH264 source stream");
+            assert_eq!(session.transport, "H.264 LAN stream");
+            assert_eq!(session.codec, "H.264 OpenH264");
+            assert!(session.endpoint.contains(":48172/h264"));
+            return;
+        }
+
+        let error = result.expect_err("receiver-only platforms must not start a source stream");
+
+        assert!(
+            error.contains("cannot start the source video engine")
+                || error.contains("requires macOS source")
+        );
     }
 }
