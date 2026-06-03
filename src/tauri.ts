@@ -347,6 +347,31 @@ export function destroyVirtualDisplay(id: string) {
   );
 }
 
+export type HostDisplayPrepareResponse = {
+  ok: boolean;
+  frameUrl: string;
+  virtualDisplay: VirtualDisplaySession | null;
+  message: string;
+};
+
+export async function prepareRemoteHostDisplay(
+  controlAddress: string,
+  request: Pick<VirtualDisplayRequest, 'width' | 'height' | 'refreshHz'> & { quality: StreamState['quality'] },
+) {
+  const url = new URL('/prepare-host-display', controlAddress);
+  url.searchParams.set('width', String(request.width));
+  url.searchParams.set('height', String(request.height));
+  url.searchParams.set('refreshHz', String(request.refreshHz));
+  url.searchParams.set('quality', request.quality);
+
+  const response = await fetch(url.toString(), { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+
+  return response.json() as Promise<HostDisplayPrepareResponse>;
+}
+
 export function getFrameServerUrl() {
   return call<string>('get_frame_server_url', 'http://127.0.0.1:48171/frame');
 }

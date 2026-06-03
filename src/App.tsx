@@ -32,6 +32,7 @@ import {
   listPeers,
   openDisplayWindow,
   openRemoteDisplayWindow,
+  prepareRemoteHostDisplay,
   removeRemoteScreen,
   runNativeSetup,
   scanPeers,
@@ -41,6 +42,7 @@ import {
   stopVideoSession,
 } from './tauri';
 import { selectDisplayPipeline } from './display-routing';
+import { framePollDelayMs } from './frame-timing';
 import { createManualPeer } from './manual-peer';
 import type {
   AudioDevice,
@@ -124,7 +126,7 @@ function ControlApp() {
     videoBackend: null,
   });
   const [selectedPeerId, setSelectedPeerId] = useState('');
-  const [quality, setQuality] = useState<StreamState['quality']>('Low latency');
+  const [quality, setQuality] = useState<StreamState['quality']>('Sharp');
   const [isBusy, setIsBusy] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
@@ -173,11 +175,9 @@ function ControlApp() {
   const needsMacVirtualDisplay = needsVirtualDisplayForPeer(data.capabilities, selectedPeer);
 
   async function startStreamAndOpenDisplay(peer: Peer, nextSession: SessionSnapshot) {
-    if (displayPipeline.kind !== 'frame-fallback') {
-      const virtualDisplayReady = await ensureVirtualDisplayForSession(peer, nextSession);
-      if (!virtualDisplayReady) {
-        return null;
-      }
+    const virtualDisplayReady = await ensureVirtualDisplayForSession(peer, nextSession);
+    if (!virtualDisplayReady) {
+      return null;
     }
 
     if (displayPipeline.kind === 'unavailable') {
@@ -268,6 +268,15 @@ function ControlApp() {
     const targetMode = modeFromScreen(screens[Math.max(0, Math.min(screenCount, screens.length) - 1)]);
 
     if (displayPipeline.kind === 'frame-fallback') {
+      if (shouldUseRemoteMacSource) {
+        await prepareRemoteHostDisplay(controlAddress, {
+          width: targetMode.width,
+          height: targetMode.height,
+          refreshHz: 60,
+          quality,
+        });
+      }
+
       const frameUrl = shouldUseRemoteMacSource ? frameUrlForPeer(peer) : await getFrameServerLanUrl(peer.address);
       const request: DisplayWindowRequest = {
         peerId: shouldUseRemoteMacSource ? peer.id : localPeerId,
@@ -882,7 +891,7 @@ function DisplayWindow() {
       const anyFrameLoaded = responses.some((response) => response.ok && response.dataUrl);
       const firstError = responses.find((response) => !response.ok)?.message ?? '';
       setControlError(anyFrameLoaded ? '' : firstError);
-      timer = window.setTimeout(loadFrames, anyFrameLoaded ? 150 : 1000);
+      timer = window.setTimeout(loadFrames, framePollDelayMs(config.quality, anyFrameLoaded));
     }
 
     void loadFrames();

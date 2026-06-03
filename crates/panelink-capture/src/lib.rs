@@ -13,6 +13,7 @@ use xcap::{image::ImageFormat, Monitor};
 
 pub const FRAME_SERVER_PORT: u16 = 48171;
 const DEFAULT_FRAME_INTERVAL_MS: u64 = 66;
+const PANELINK_DISPLAY_NAME: &str = "panelink";
 static FRAME_INTERVAL_MS: AtomicU64 = AtomicU64::new(DEFAULT_FRAME_INTERVAL_MS);
 
 #[derive(Debug, Default)]
@@ -23,6 +24,13 @@ struct FrameCache {
 }
 
 type SharedFrameCache = Arc<RwLock<FrameCache>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MonitorDescriptor {
+    index: usize,
+    name: String,
+    is_primary: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,11 +141,14 @@ fn is_permission_related_capture_error(error: &str) -> bool {
 }
 
 pub fn capture_primary_png() -> Result<Vec<u8>, String> {
-    let monitor = Monitor::all()
-        .map_err(|error| format!("Could not list monitors: {error}"))?
-        .into_iter()
-        .next()
+    let monitors = Monitor::all().map_err(|error| format!("Could not list monitors: {error}"))?;
+    let descriptors = monitor_descriptors(&monitors);
+    let monitor_index = preferred_monitor_index(&descriptors)
+        .or_else(|| (!monitors.is_empty()).then_some(0))
         .ok_or_else(|| "No monitor found to capture".to_string())?;
+    let monitor = monitors
+        .get(monitor_index)
+        .ok_or_else(|| format!("Selected monitor index {monitor_index} is unavailable"))?;
     let image = monitor
         .capture_image()
         .map_err(|error| format!("Could not capture monitor: {error}"))?;
@@ -148,6 +159,32 @@ pub fn capture_primary_png() -> Result<Vec<u8>, String> {
         .map_err(|error| format!("Could not encode captured frame: {error}"))?;
 
     Ok(bytes.into_inner())
+}
+
+fn monitor_descriptors(monitors: &[Monitor]) -> Vec<MonitorDescriptor> {
+    monitors
+        .iter()
+        .enumerate()
+        .map(|(index, monitor)| MonitorDescriptor {
+            index,
+            name: monitor.name().unwrap_or_default(),
+            is_primary: monitor.is_primary().unwrap_or(false),
+        })
+        .collect()
+}
+
+fn preferred_monitor_index(monitors: &[MonitorDescriptor]) -> Option<usize> {
+    monitors
+        .iter()
+        .find(|monitor| {
+            monitor
+                .name
+                .to_ascii_lowercase()
+                .contains(PANELINK_DISPLAY_NAME)
+        })
+        .or_else(|| monitors.iter().find(|monitor| !monitor.is_primary))
+        .or_else(|| monitors.first())
+        .map(|monitor| monitor.index)
 }
 
 fn run_frame_server(server: Server, cache: SharedFrameCache) {
@@ -189,7 +226,7 @@ fn update_requested_frame_interval(url: &str) {
 fn frame_interval_for_quality(quality: &str) -> u64 {
     match quality {
         "Low latency" => 33,
-        "Sharp" => 120,
+        "Sharp" => 16,
         _ => 66,
     }
 }
@@ -357,7 +394,7 @@ mod tests {
     fn frame_interval_tracks_quality_modes() {
         assert_eq!(frame_interval_for_quality("Low latency"), 33);
         assert_eq!(frame_interval_for_quality("Balanced"), 66);
-        assert_eq!(frame_interval_for_quality("Sharp"), 120);
+        assert_eq!(frame_interval_for_quality("Sharp"), 16);
     }
 
     #[test]
@@ -370,5 +407,46 @@ mod tests {
             query_value("x=1&quality=Sharp", "quality").as_deref(),
             Some("Sharp")
         );
+    }
+
+    #[test]
+    fn capture_prefers_panelink_virtual_display() {
+        let monitors = [
+            MonitorDescriptor {
+                index: 0,
+                name: "Built-in Retina Display".into(),
+                is_primary: true,
+            },
+            MonitorDescriptor {
+                index: 1,
+                name: "Dell U2723QE".into(),
+                is_primary: false,
+            },
+            MonitorDescriptor {
+                index: 2,
+                name: "PaneLink Virtual Display".into(),
+                is_primary: false,
+            },
+        ];
+
+        assert_eq!(preferred_monitor_index(&monitors), Some(2));
+    }
+
+    #[test]
+    fn capture_falls_back_to_non_primary_display_before_primary() {
+        let monitors = [
+            MonitorDescriptor {
+                index: 0,
+                name: "Built-in Retina Display".into(),
+                is_primary: true,
+            },
+            MonitorDescriptor {
+                index: 1,
+                name: "Extended Display".into(),
+                is_primary: false,
+            },
+        ];
+
+        assert_eq!(preferred_monitor_index(&monitors), Some(1));
     }
 }

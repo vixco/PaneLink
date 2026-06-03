@@ -9,6 +9,7 @@ use std::{
     io::Cursor,
     io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket},
+    sync::{Mutex, OnceLock},
     thread,
     time::Duration,
 };
@@ -47,6 +48,23 @@ struct RawHttpResponse {
 #[serde(rename_all = "camelCase")]
 struct RemoteDisplayResponse {
     ok: bool,
+    message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HostDisplayPrepareRequest {
+    width: u32,
+    height: u32,
+    refresh_hz: u16,
+    quality: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostDisplayPrepareResponse {
+    ok: bool,
+    frame_url: String,
+    virtual_display: Option<panelink_virtual_display::VirtualDisplaySession>,
     message: String,
 }
 
@@ -846,6 +864,11 @@ fn run_remote_control_server(app: AppHandle, server: Server) {
                 Ok(frame_url) => proxied_frame_response(&frame_url),
                 Err(error) => text_control_response(error, StatusCode(400)),
             }
+        } else if matches!(method.as_str(), "GET" | "POST") && path == "/prepare-host-display" {
+            match host_display_prepare_request_from_url(&url) {
+                Ok(prepare_request) => host_display_prepare_response(prepare_request),
+                Err(error) => text_control_response(error, StatusCode(400)),
+            }
         } else if method == "POST" && path == "/input-events" {
             remote_input_response(&mut request)
         } else if path == "/health" {
@@ -856,6 +879,65 @@ fn run_remote_control_server(app: AppHandle, server: Server) {
 
         let _ = request.respond(response);
     }
+}
+
+fn host_display_prepare_response(request: HostDisplayPrepareRequest) -> Response<Cursor<Vec<u8>>> {
+    match prepare_host_display(request) {
+        Ok(response) => match serde_json::to_string(&response) {
+            Ok(json) => text_control_response(json, StatusCode(200))
+                .with_header(header("Content-Type", "application/json")),
+            Err(error) => text_control_response(
+                format!("Could not encode host display response: {error}"),
+                StatusCode(500),
+            ),
+        },
+        Err(error) => text_control_response(error, StatusCode(500)),
+    }
+}
+
+fn prepare_host_display(
+    request: HostDisplayPrepareRequest,
+) -> Result<HostDisplayPrepareResponse, String> {
+    let virtual_display = ensure_host_virtual_display(&request)?;
+    let port = panelink_capture::start_frame_server()?;
+
+    Ok(HostDisplayPrepareResponse {
+        ok: true,
+        frame_url: format!("http://127.0.0.1:{port}/frame"),
+        virtual_display: Some(virtual_display),
+        message: "PaneLink host virtual display is ready and frame server is running.".into(),
+    })
+}
+
+fn ensure_host_virtual_display(
+    request: &HostDisplayPrepareRequest,
+) -> Result<panelink_virtual_display::VirtualDisplaySession, String> {
+    let mut slot = host_virtual_display_slot()
+        .lock()
+        .map_err(|_| "Host virtual display state is unavailable".to_string())?;
+
+    if let Some(session) = slot.as_ref().filter(|session| session.active) {
+        return Ok(session.clone());
+    }
+
+    let session = panelink_virtual_display::create_virtual_display(
+        panelink_virtual_display::VirtualDisplayRequest {
+            name: "PaneLink Virtual Display".into(),
+            width: request.width,
+            height: request.height,
+            refresh_hz: request.refresh_hz,
+        },
+    )?;
+    *slot = Some(session.clone());
+
+    Ok(session)
+}
+
+fn host_virtual_display_slot(
+) -> &'static Mutex<Option<panelink_virtual_display::VirtualDisplaySession>> {
+    static HOST_DISPLAY: OnceLock<Mutex<Option<panelink_virtual_display::VirtualDisplaySession>>> =
+        OnceLock::new();
+    HOST_DISPLAY.get_or_init(|| Mutex::new(None))
 }
 
 fn remote_input_response(request: &mut tiny_http::Request) -> Response<Cursor<Vec<u8>>> {
@@ -893,6 +975,33 @@ fn frame_proxy_url_from_request(url: &str) -> Result<String, String> {
         .filter(|value| !value.trim().is_empty())
         .cloned()
         .ok_or_else(|| "Frame proxy request is missing url".to_string())
+}
+
+fn host_display_prepare_request_from_url(url: &str) -> Result<HostDisplayPrepareRequest, String> {
+    let values = url
+        .split_once('?')
+        .map(|(_, query)| parse_query(query))
+        .unwrap_or_default();
+
+    Ok(HostDisplayPrepareRequest {
+        width: values
+            .get("width")
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(1920),
+        height: values
+            .get("height")
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(1080),
+        refresh_hz: values
+            .get("refreshHz")
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(60),
+        quality: values
+            .get("quality")
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| "Sharp".into()),
+    })
 }
 
 fn proxied_frame_response(frame_url: &str) -> Response<Cursor<Vec<u8>>> {
@@ -1075,6 +1184,19 @@ mod tests {
         assert_eq!(request.video_codec.as_deref(), Some("H.264 VideoToolbox"));
         assert_eq!(request.screen_count, Some(2));
         assert_eq!(request.quality.as_deref(), Some("Low latency"));
+    }
+
+    #[test]
+    fn host_display_prepare_request_decodes_monitor_mode() {
+        let request = host_display_prepare_request_from_url(
+            "/prepare-host-display?width=2560&height=1440&refreshHz=60&quality=Sharp",
+        )
+        .expect("host display request should parse");
+
+        assert_eq!(request.width, 2560);
+        assert_eq!(request.height, 1440);
+        assert_eq!(request.refresh_hz, 60);
+        assert_eq!(request.quality, "Sharp");
     }
 
     #[test]
