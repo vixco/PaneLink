@@ -8,7 +8,7 @@ use std::{
     collections::HashMap,
     io::Cursor,
     io::{Read, Write},
-    net::{SocketAddr, TcpStream, ToSocketAddrs},
+    net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket},
     thread,
     time::Duration,
 };
@@ -96,24 +96,40 @@ fn get_frame_server_url() -> Result<String, String> {
 #[tauri::command]
 fn get_frame_server_lan_url() -> Result<String, String> {
     let port = panelink_capture::start_frame_server()?;
-    let advertisement = panelink_discovery::advertise_payload();
-    let host = host_from_authority(&advertisement.address)
-        .filter(|host| host != "0.0.0.0" && host != "127.0.0.1")
-        .ok_or_else(|| {
-            "Could not determine this device's LAN address for remote display streaming".to_string()
-        })?;
+    let host = lan_host_for_peer(None).ok_or_else(|| {
+        "Could not determine this device's LAN address for remote display streaming".to_string()
+    })?;
+
+    Ok(format!("http://{host}:{port}/frame"))
+}
+
+#[tauri::command]
+fn get_frame_server_lan_url_for_peer(peer_address: String) -> Result<String, String> {
+    let port = panelink_capture::start_frame_server()?;
+    let host = lan_host_for_peer(Some(&peer_address)).ok_or_else(|| {
+        format!("Could not determine this device's LAN address toward {peer_address}")
+    })?;
 
     Ok(format!("http://{host}:{port}/frame"))
 }
 
 #[tauri::command]
 fn get_control_server_lan_url() -> Result<String, String> {
-    let advertisement = panelink_discovery::advertise_payload();
-    let host = host_from_authority(&advertisement.address)
-        .filter(|host| host != "0.0.0.0" && host != "127.0.0.1")
-        .ok_or_else(|| {
-            "Could not determine this device's LAN address for remote display control".to_string()
-        })?;
+    let host = lan_host_for_peer(None).ok_or_else(|| {
+        "Could not determine this device's LAN address for remote display control".to_string()
+    })?;
+
+    Ok(format!(
+        "http://{host}:{}",
+        panelink_discovery::DEFAULT_PORT
+    ))
+}
+
+#[tauri::command]
+fn get_control_server_lan_url_for_peer(peer_address: String) -> Result<String, String> {
+    let host = lan_host_for_peer(Some(&peer_address)).ok_or_else(|| {
+        format!("Could not determine this device's LAN control address toward {peer_address}")
+    })?;
 
     Ok(format!(
         "http://{host}:{}",
@@ -333,6 +349,57 @@ fn host_from_authority(value: &str) -> Option<String> {
             .unwrap_or(value)
             .to_string(),
     )
+}
+
+fn lan_host_for_peer(peer_address: Option<&str>) -> Option<String> {
+    let peer_routed_host = peer_address.and_then(peer_routed_lan_host);
+    let advertised_address = panelink_discovery::advertise_payload().address;
+
+    stream_host_from_candidates(peer_routed_host, &advertised_address)
+}
+
+fn stream_host_from_candidates(
+    peer_routed_host: Option<String>,
+    advertised_address: &str,
+) -> Option<String> {
+    peer_routed_host
+        .filter(|host| is_usable_lan_host(host))
+        .or_else(|| host_from_authority(advertised_address).filter(|host| is_usable_lan_host(host)))
+}
+
+fn peer_routed_lan_host(peer_address: &str) -> Option<String> {
+    let peer_host = host_from_authority(peer_address)?;
+    let peer_ip = peer_host.parse::<IpAddr>().ok()?;
+    if !is_usable_lan_host(&peer_ip.to_string()) {
+        return None;
+    }
+
+    let bind_address = if peer_ip.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = UdpSocket::bind(bind_address).ok()?;
+    socket
+        .connect(SocketAddr::new(peer_ip, panelink_discovery::DEFAULT_PORT))
+        .ok()?;
+
+    socket
+        .local_addr()
+        .ok()
+        .map(|address| address.ip().to_string())
+        .filter(|host| is_usable_lan_host(host))
+}
+
+fn is_usable_lan_host(host: &str) -> bool {
+    let host = host.trim();
+    if host.is_empty() {
+        return false;
+    }
+
+    host.parse::<IpAddr>()
+        .map(|ip| !ip.is_loopback() && !ip.is_unspecified())
+        .unwrap_or(true)
 }
 
 #[derive(Debug)]
@@ -980,6 +1047,14 @@ mod tests {
     }
 
     #[test]
+    fn stream_host_prefers_peer_routed_lan_ip_over_advertised_vpn_ip() {
+        let host = stream_host_from_candidates(Some("192.168.1.6".into()), "10.14.0.2")
+            .expect("peer-routed LAN host should be selected");
+
+        assert_eq!(host, "192.168.1.6");
+    }
+
+    #[test]
     fn display_request_from_url_decodes_remote_display_payload() {
         let request = display_request_from_url(
             "/open-display?peerId=mac%201&peerAddress=webrtc%2Brtp%3A%2F%2Fwindows%2Fpanelink%2Fvideo-1&controlAddress=http%3A%2F%2F192.168.1.24%3A48170&videoSessionId=video-1&videoTransport=WebRTC%2FRTP&videoCodec=H.264+VideoToolbox&screens=2&quality=Low+latency",
@@ -1282,7 +1357,9 @@ fn main() {
             issue_pairing_token,
             get_frame_server_url,
             get_frame_server_lan_url,
+            get_frame_server_lan_url_for_peer,
             get_control_server_lan_url,
+            get_control_server_lan_url_for_peer,
             fetch_remote_frame,
             open_remote_display_window,
             get_session_snapshot,
